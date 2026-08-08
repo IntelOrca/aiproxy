@@ -1,0 +1,19 @@
+{
+  "port": 8080,
+  "backends": [
+    { "id": "opencode-1", "baseUrl": "http://127.0.0.1:3456/v1", "weight": 1, "priority": 0 },
+    { "id": "opencode-2", "baseUrl": "http://127.0.0.1:3457/v1", "weight": 1, "priority": 1, "apiKey": "opencode2-key" },
+    { "id": "opencode-3", "baseUrl": "http://127.0.0.1:3458/v1", "weight": 1, "priority": 1 }
+  ],
+  "sticky": true,
+  "healthCheckIntervalMs": 10000,
+  "healthCheckTimeoutMs": 2500,
+  "sessionTtlMs": 1800000,
+  "upstreamTimeoutMs": 600000,
+  "maxRetries": 2,
+  "retryStatusCodes": [429, 529],
+  "retryOnLimitMessage": true,
+  "models": ["gpt-4o"],
+  "modelMap": {},
+  "apiKeys": []
+}

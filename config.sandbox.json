@@ -1,0 +1,13 @@
+{
+  "port": 6060,
+  "backends": [
+    { "id": "sandbox-1", "baseUrl": "http://127.0.0.1:6061/v1", "weight": 1 },
+    { "id": "sandbox-2", "baseUrl": "http://127.0.0.1:6062/v1", "weight": 1 },
+    { "id": "sandbox-3", "baseUrl": "http://127.0.0.1:6063/v1", "weight": 1 }
+  ],
+  "sticky": true,
+  "healthCheckIntervalMs": 5000,
+  "healthCheckTimeoutMs": 2000,
+  "maxRetries": 2,
+  "models": ["sandbox-gpt-4o", "sandbox-claude-sonnet", "sandbox-llama-3.1-70b"]
+}

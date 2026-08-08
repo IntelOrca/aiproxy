@@ -1,0 +1,8 @@
+# Local router config — contains backend endpoints and API keys
+config.json
+
+# Logs
+*.log
+
+# Deno cache / runtime
+.deno/
