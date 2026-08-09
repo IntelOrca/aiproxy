@@ -1,0 +1,11 @@
+# VCS / tooling
+.git
+.github
+.deno
+
+# Local secrets and logs — never bake a real config into the image
+config.json
+*.log
+
+# Editor / OS noise
+.DS_Store
