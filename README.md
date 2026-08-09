@@ -13,6 +13,8 @@ caching is content-addressed per account, so keeping a conversation on a single
 backend keeps that backend's prompt cache warm: later turns only bill for new
 tokens instead of the full prefix every time.
 
+<img src="docs\dashboard.jpg" alt="Dashboard" height="300">
+
 ## Key features
 
 - Weighted random selection among healthy backends for new conversations.
