@@ -10,6 +10,7 @@ const DEFAULTS = {
   maxRetries: 1,
   retryStatusCodes: [429, 529],
   retryOnLimitMessage: true,
+  recentRoutes: 200,
 };
 
 export function loadConfig(path = "config.json"): Config {
@@ -66,5 +67,7 @@ export function loadConfig(path = "config.json"): Config {
     stateDir: typeof partial.stateDir === "string" && partial.stateDir
       ? partial.stateDir
       : undefined,
+    recentRoutes: Number(partial.recentRoutes ?? DEFAULTS.recentRoutes) ||
+      DEFAULTS.recentRoutes,
   };
 }

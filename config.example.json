@@ -13,6 +13,7 @@
   "maxRetries": 2,
   "retryStatusCodes": [429, 529],
   "retryOnLimitMessage": true,
+  "recentRoutes": 200,
   "models": ["gpt-4o"],
   "modelMap": {},
   "apiKeys": []

@@ -43,4 +43,17 @@ export interface Config {
    * state dir: %LOCALAPPDATA%\aiproxy (Windows) or ~/.cache/aiproxy (elsewhere).
    */
   stateDir?: string;
+  /** How many recent route entries to keep and persist (default 200) */
+  recentRoutes?: number;
+}
+
+/** A single routed request, shown in the dashboard and persisted for restarts. */
+export interface RoutingEntry {
+  at: string;
+  sessionId: string;
+  model: string;
+  backendId: string;
+  endpoint: string;
+  status: number;
+  ms: number;
 }

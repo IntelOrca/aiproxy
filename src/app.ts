@@ -1,27 +1,52 @@
-import type { Config } from "./types.ts";
+import type { Config, RoutingEntry } from "./types.ts";
 import { BackendManager, withPath } from "./backend.ts";
+import { defaultStateDir } from "./pins-store.ts";
+import { loadStats, saveStats } from "./stats-store.ts";
 import { sessionKeyFromBody } from "./session.ts";
 import { forwardWithRetry } from "./upstream.ts";
-
-interface RoutingEntry {
-  at: string;
-  sessionId: string;
-  model: string;
-  backendId: string;
-  endpoint: string;
-  status: number;
-  ms: number;
-}
 
 /** Start the router HTTP server. Blocks; call as the last thing in main. */
 export function startAiproxy(config: Config): void {
   const manager = new BackendManager(config);
   manager.startHealthChecks();
 
-  // Flush persisted session pins on shutdown.
+  const stateDir = config.stateDir ?? defaultStateDir();
+  const maxRecent = Math.max(1, config.recentRoutes ?? 200);
+
+  // Restore stats from the previous run.
+  const restored = loadStats(stateDir);
+  const backendCounts = new Map<string, number>(
+    config.backends.map((b) => [b.id, restored.backendCounts[b.id] ?? 0]),
+  );
+  const knownIds = new Set(config.backends.map((b) => b.id));
+  const recent: RoutingEntry[] = restored.recent
+    .filter((r) => knownIds.has(r.backendId))
+    .slice(0, maxRecent);
+
+  let statsDirty = false;
+  let statsTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function persistStats(): void {
+    if (!statsDirty) return;
+    statsDirty = false;
+    saveStats(stateDir, Object.fromEntries(backendCounts), recent);
+  }
+
+  function persistStatsSoon(): void {
+    statsDirty = true;
+    if (statsTimer) return;
+    statsTimer = setTimeout(() => {
+      statsTimer = undefined;
+      persistStats();
+    }, 500);
+  }
+
+  // Flush persisted state on shutdown.
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     try {
       Deno.addSignalListener(sig, () => {
+        if (statsTimer) clearTimeout(statsTimer);
+        persistStats();
         manager.stop();
         Deno.exit(0);
       });
@@ -29,9 +54,6 @@ export function startAiproxy(config: Config): void {
       // Signal listeners not supported on this platform.
     }
   }
-
-  const backendCounts = new Map<string, number>(config.backends.map((b) => [b.id, 0]));
-  const recent: RoutingEntry[] = [];
 
   async function handleModels(): Promise<Response> {
     if (config.models) {
@@ -86,13 +108,14 @@ export function startAiproxy(config: Config): void {
         retryStatusCodes: config.retryStatusCodes ?? [429, 529],
         retryOnLimitMessage: config.retryOnLimitMessage ?? true,
         authRequired: Array.isArray(config.apiKeys) && config.apiKeys.length > 0,
+        recentRoutes: maxRecent,
       },
       models: config.models ?? null,
       backends: manager.healthReport().map((b) => ({
         ...b,
         requests: backendCounts.get(b.id) ?? 0,
       })),
-      recent: recent.slice(0, 50),
+      recent: recent.slice(0, maxRecent),
     });
   }
 
@@ -144,7 +167,8 @@ export function startAiproxy(config: Config): void {
             status: result.response.status,
             ms,
           });
-          if (recent.length > 200) recent.pop();
+          if (recent.length > maxRecent) recent.pop();
+          persistStatsSoon();
         }
 
         console.log(

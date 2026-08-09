@@ -122,7 +122,8 @@ copilot
 | `models`                | proxied        | Static `/v1/models` list (see below).                    |
 | `modelMap`              | `{}`           | Client model → backend model rewrites (see below).       |
 | `apiKeys`               | `[]`           | Client API keys required on incoming requests.           |
-| `stateDir`              | platform dir   | Directory for persisted session pins (see below).        |
+| `stateDir`              | platform dir   | Directory for persisted state (pins, stats) — see below. |
+| `recentRoutes`          | `200`          | How many recent route entries to keep and persist.       |
 
 ### What is `models` for?
 
@@ -192,16 +193,21 @@ stays open on localhost so you can watch routing.
 ### Session pins survive restarts
 
 Session → backend pins are persisted to a JSON file so a restart doesn't scatter every
-conversation across new backends (and lose all the warm prompt caches):
+conversation across new backends (and lose all the warm prompt caches). Backend request counts
+and the recent-routes log are persisted too, so the dashboard comes back exactly as you left
+it. All state lives in one directory:
 
-- **Windows:** `%LOCALAPPDATA%\aiproxy\pins.json`
-- **Linux/macOS:** `$XDG_CACHE_HOME/aiproxy/pins.json` or `~/.cache/aiproxy/pins.json`
+- **Windows:** `%LOCALAPPDATA%\aiproxy\` (`pins.json`, `stats.json`)
+- **Linux/macOS:** `$XDG_CACHE_HOME/aiproxy/` or `~/.cache/aiproxy/`
 
 Point it elsewhere with `"stateDir": "/path/to/dir"` in the config. On startup the router
 restores pins whose backend still exists in the config and whose `lastSeen` is newer than
-`sessionTtlMs`; expired or orphaned pins are dropped. The router needs `--allow-write` for
-this — already granted in `aiproxy.bat` and `deno task start`. Writes are debounced and
-atomic (temp file + rename).
+`sessionTtlMs`; expired or orphaned pins are dropped. Recent routes from backends no longer in
+the config are dropped too. The router needs `--allow-write` for this — already granted in
+`aiproxy.bat` and `deno task start`. Writes are debounced and atomic (temp file + rename).
+
+How much history to keep is controlled by `"recentRoutes"` (default 200) — the dashboard's
+"Recent routes" table and the persisted `stats.json` are capped at that many entries.
 
 ## Tests
 

@@ -35,36 +35,18 @@ export function defaultStateDir(): string {
   return join(Deno.cwd(), ".aiproxy-cache");
 }
 
-function pinsFile(stateDir: string): string {
-  return join(stateDir, "pins.json");
+/** Join paths with the platform separator. */
+export function joinPath(...parts: string[]): string {
+  return join(...parts);
 }
 
-/** Load persisted pins. Returns an empty map when nothing is stored yet. */
-export function loadPins(stateDir: string): Map<string, StoredPin> {
-  try {
-    const data = JSON.parse(Deno.readTextFileSync(pinsFile(stateDir)));
-    if (data?.version !== PIN_FILE_VERSION || !data.pins) return new Map();
-    const pins = new Map<string, StoredPin>();
-    for (const [key, value] of Object.entries(data.pins)) {
-      const v = value as Partial<StoredPin>;
-      if (v && typeof v.backendId === "string" && typeof v.lastSeen === "number") {
-        pins.set(key, { backendId: v.backendId, lastSeen: v.lastSeen });
-      }
-    }
-    return pins;
-  } catch {
-    return new Map();
-  }
-}
-
-/** Persist pins atomically (temp file + rename). Best-effort. */
-export function savePins(stateDir: string, pins: Map<string, StoredPin>): void {
-  const file = pinsFile(stateDir);
-  const payload = JSON.stringify(
-    { version: PIN_FILE_VERSION, pins: Object.fromEntries(pins) },
-    null,
-    2,
-  );
+/**
+ * Atomically write a JSON value to `<stateDir>/<filename>` (temp file +
+ * rename). Silently no-ops when write permission is missing.
+ */
+export function writeJsonAtomic(stateDir: string, filename: string, data: unknown): void {
+  const file = join(stateDir, filename);
+  const payload = JSON.stringify(data, null, 2);
   try {
     Deno.mkdirSync(stateDir, { recursive: true });
     const tmp = file + ".tmp";
@@ -78,7 +60,44 @@ export function savePins(stateDir: string, pins: Map<string, StoredPin>): void {
   } catch (err) {
     if (err instanceof Deno.errors.PermissionDenied) return; // persistence not enabled
     console.warn(
-      `[aiproxy] could not persist session pins: ${err instanceof Error ? err.message : err}`,
+      `[aiproxy] could not persist ${filename}: ${err instanceof Error ? err.message : err}`,
     );
   }
+}
+
+/** Read and parse a JSON file from the state dir, or null when missing/invalid. */
+export function readJson(stateDir: string, filename: string): unknown {
+  try {
+    return JSON.parse(Deno.readTextFileSync(join(stateDir, filename)));
+  } catch {
+    return null;
+  }
+}
+
+function pinsFile(stateDir: string): string {
+  return join(stateDir, "pins.json");
+}
+
+/** Load persisted pins. Returns an empty map when nothing is stored yet. */
+export function loadPins(stateDir: string): Map<string, StoredPin> {
+  const data = readJson(stateDir, "pins.json") as {
+    version?: number;
+    pins?: Record<string, Partial<StoredPin>>;
+  } | null;
+  if (data?.version !== PIN_FILE_VERSION || !data.pins) return new Map();
+  const pins = new Map<string, StoredPin>();
+  for (const [key, value] of Object.entries(data.pins)) {
+    if (value && typeof value.backendId === "string" && typeof value.lastSeen === "number") {
+      pins.set(key, { backendId: value.backendId, lastSeen: value.lastSeen });
+    }
+  }
+  return pins;
+}
+
+/** Persist pins atomically (temp file + rename). Best-effort. */
+export function savePins(stateDir: string, pins: Map<string, StoredPin>): void {
+  writeJsonAtomic(stateDir, "pins.json", {
+    version: PIN_FILE_VERSION,
+    pins: Object.fromEntries(pins),
+  });
 }
