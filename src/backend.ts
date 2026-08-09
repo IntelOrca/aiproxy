@@ -1,5 +1,10 @@
 import type { Config } from "./types.ts";
-import { defaultStateDir, loadPins, savePins, type StoredPin } from "./pins-store.ts";
+import {
+  defaultStateDir,
+  loadPins,
+  savePins,
+  type StoredPin,
+} from "./pins-store.ts";
 
 interface BackendState {
   config: Config["backends"][number];
@@ -37,7 +42,9 @@ export class BackendManager {
       restored++;
     }
     if (restored > 0) {
-      console.log(`[aiproxy] restored ${restored} session pin(s) from ${this.pinsDir}`);
+      console.log(
+        `[aiproxy] restored ${restored} session pin(s) from ${this.pinsDir}`,
+      );
     }
   }
 

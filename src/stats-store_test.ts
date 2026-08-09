@@ -35,7 +35,10 @@ Deno.test("loadStats returns empty for missing or malformed files", () => {
 
   // Malformed JSON -> empty.
   Deno.mkdirSync(dir, { recursive: true });
-  Deno.writeTextFileSync(dir + (Deno.build.os === "windows" ? "\\" : "/") + "stats.json", "not json");
+  Deno.writeTextFileSync(
+    dir + (Deno.build.os === "windows" ? "\\" : "/") + "stats.json",
+    "not json",
+  );
   const malformed = loadStats(dir);
   assert.deepStrictEqual(malformed, { backendCounts: {}, recent: [] });
 
@@ -44,7 +47,11 @@ Deno.test("loadStats returns empty for missing or malformed files", () => {
 
 Deno.test("loadStats drops invalid entries", () => {
   const dir = Deno.makeTempDirSync({ prefix: "aiproxy-stats-" });
-  const bad = { version: 1, backendCounts: { "x": "oops" }, recent: [{ nope: true }] };
+  const bad = {
+    version: 1,
+    backendCounts: { "x": "oops" },
+    recent: [{ nope: true }],
+  };
   const file = dir + (Deno.build.os === "windows" ? "\\" : "/") + "stats.json";
   Deno.writeTextFileSync(file, JSON.stringify(bad));
 
@@ -64,7 +71,10 @@ Deno.test("config recentRoutes defaults to 200 and honors explicit value", () =>
   assert.strictEqual(loadConfig(plain).recentRoutes, 200);
 
   const custom = dir + sep + "custom.json";
-  Deno.writeTextFileSync(custom, JSON.stringify({ recentRoutes: 10, backends: [] }));
+  Deno.writeTextFileSync(
+    custom,
+    JSON.stringify({ recentRoutes: 10, backends: [] }),
+  );
   assert.strictEqual(loadConfig(custom).recentRoutes, 10);
 
   Deno.removeSync(dir, { recursive: true });

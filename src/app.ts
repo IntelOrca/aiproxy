@@ -41,7 +41,6 @@ export function startAiproxy(config: Config): void {
     }, 500);
   }
 
-  let server: ReturnType<typeof Deno.serve> | undefined;
   let shuttingDown = false;
 
   /**
@@ -52,7 +51,9 @@ export function startAiproxy(config: Config): void {
     if (shuttingDown) return;
     shuttingDown = true;
     const graceMs = Math.max(0, config.shutdownGraceMs ?? 10_000);
-    console.log(`[aiproxy] shutting down; draining in-flight requests (up to ${graceMs}ms)`);
+    console.log(
+      `[aiproxy] shutting down; draining in-flight requests (up to ${graceMs}ms)`,
+    );
     try {
       if (server) {
         await Promise.race([
@@ -61,7 +62,11 @@ export function startAiproxy(config: Config): void {
         ]);
       }
     } catch (err) {
-      console.warn(`[aiproxy] drain interrupted: ${err instanceof Error ? err.message : err}`);
+      console.warn(
+        `[aiproxy] drain interrupted: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
     }
     if (statsTimer) clearTimeout(statsTimer);
     persistStats();
@@ -140,7 +145,8 @@ export function startAiproxy(config: Config): void {
         sticky: config.sticky !== false,
         retryStatusCodes: config.retryStatusCodes ?? [429, 529],
         retryOnLimitMessage: config.retryOnLimitMessage ?? true,
-        authRequired: Array.isArray(config.apiKeys) && config.apiKeys.length > 0,
+        authRequired: Array.isArray(config.apiKeys) &&
+          config.apiKeys.length > 0,
         recentRoutes: maxRecent,
         shutdownGraceMs: config.shutdownGraceMs ?? 10_000,
       },
@@ -159,93 +165,102 @@ export function startAiproxy(config: Config): void {
     });
   }
 
-  server = Deno.serve({ port: config.port, hostname: "127.0.0.1" }, async (req) => {
-    if (shuttingDown) return jsonError(503, "server is shutting down");
-    const url = new URL(req.url);
-    const t0 = performance.now();
+  const server = Deno.serve(
+    { port: config.port, hostname: "127.0.0.1" },
+    async (req) => {
+      if (shuttingDown) return jsonError(503, "server is shutting down");
+      const url = new URL(req.url);
+      const t0 = performance.now();
 
-    try {
-      if (req.method === "OPTIONS") return new Response(null, { status: 204 });
-
-      if (req.method === "GET") {
-        if (url.pathname === "/" || url.pathname === "/index.html") {
-          return dashboardHtml();
+      try {
+        if (req.method === "OPTIONS") {
+          return new Response(null, {
+            status: 204,
+          });
         }
-        if (url.pathname === "/api/status") return statusJson();
-        if (url.pathname === "/models" || url.pathname === "/v1/models") {
+
+        if (req.method === "GET") {
+          if (url.pathname === "/" || url.pathname === "/index.html") {
+            return dashboardHtml();
+          }
+          if (url.pathname === "/api/status") return statusJson();
+          if (url.pathname === "/models" || url.pathname === "/v1/models") {
+            if (!clientAuthorized(req)) {
+              return jsonError(401, "invalid or missing API key");
+            }
+            return await handleModels();
+          }
+          return jsonError(404, `no route for GET ${url.pathname}`);
+        }
+
+        if (
+          req.method === "POST" && url.pathname.endsWith("/chat/completions")
+        ) {
           if (!clientAuthorized(req)) {
             return jsonError(401, "invalid or missing API key");
           }
-          return await handleModels();
-        }
-        return jsonError(404, `no route for GET ${url.pathname}`);
-      }
+          const text = await req.text();
+          let body: unknown;
+          try {
+            body = JSON.parse(text);
+          } catch {
+            return jsonError(400, "invalid JSON body");
+          }
+          const bodyObj: Record<string, unknown> =
+            body && typeof body === "object" &&
+              !Array.isArray(body)
+              ? body as Record<string, unknown>
+              : {};
 
-      if (req.method === "POST" && url.pathname.endsWith("/chat/completions")) {
-        if (!clientAuthorized(req)) {
-          return jsonError(401, "invalid or missing API key");
-        }
-        const text = await req.text();
-        let body: unknown;
-        try {
-          body = JSON.parse(text);
-        } catch {
-          return jsonError(400, "invalid JSON body");
-        }
-        const bodyObj: Record<string, unknown> =
-          body && typeof body === "object" &&
-            !Array.isArray(body)
-            ? body as Record<string, unknown>
-            : {};
-
-        const sessionKey = await sessionKeyFromBody(req, body);
-        const result = await forwardWithRetry(
-          req,
-          body,
-          sessionKey,
-          manager,
-          config,
-        );
-        const ms = Math.round(performance.now() - t0);
-
-        if (result.backendId !== "none") {
-          backendCounts.set(
-            result.backendId,
-            (backendCounts.get(result.backendId) ?? 0) + 1,
+          const sessionKey = await sessionKeyFromBody(req, body);
+          const result = await forwardWithRetry(
+            req,
+            body,
+            sessionKey,
+            manager,
+            config,
           );
-          recent.unshift({
-            at: new Date().toISOString(),
-            sessionId: sessionKey ?? "-",
-            model: String(bodyObj.model ?? "-"),
-            backendId: result.backendId,
-            endpoint: result.endpoint,
-            status: result.response.status,
-            ms,
-          });
-          if (recent.length > maxRecent) recent.pop();
-          persistStatsSoon();
+          const ms = Math.round(performance.now() - t0);
+
+          if (result.backendId !== "none") {
+            backendCounts.set(
+              result.backendId,
+              (backendCounts.get(result.backendId) ?? 0) + 1,
+            );
+            recent.unshift({
+              at: new Date().toISOString(),
+              sessionId: sessionKey ?? "-",
+              model: String(bodyObj.model ?? "-"),
+              backendId: result.backendId,
+              endpoint: result.endpoint,
+              status: result.response.status,
+              ms,
+            });
+            if (recent.length > maxRecent) recent.pop();
+            persistStatsSoon();
+          }
+
+          console.log(
+            `[aiproxy] ${req.method} ${url.pathname} session=${
+              sessionKey ?? "-"
+            } ` +
+              `-> ${result.backendId}${
+                result.endpoint ? ` (${result.endpoint})` : ""
+              } ` +
+              `model=${
+                String(bodyObj.model ?? "-")
+              } status=${result.response.status} ${ms}ms`,
+          );
+          return result.response;
         }
 
-        console.log(
-          `[aiproxy] ${req.method} ${url.pathname} session=${
-            sessionKey ?? "-"
-          } ` +
-            `-> ${result.backendId}${
-              result.endpoint ? ` (${result.endpoint})` : ""
-            } ` +
-            `model=${
-              String(bodyObj.model ?? "-")
-            } status=${result.response.status} ${ms}ms`,
-        );
-        return result.response;
+        return jsonError(404, `no route for ${req.method} ${url.pathname}`);
+      } catch (err) {
+        console.error("[aiproxy] error:", err);
+        return jsonError(500, err instanceof Error ? err.message : String(err));
       }
-
-      return jsonError(404, `no route for ${req.method} ${url.pathname}`);
-    } catch (err) {
-      console.error("[aiproxy] error:", err);
-      return jsonError(500, err instanceof Error ? err.message : String(err));
-    }
-  });
+    },
+  );
 }
 
 const DASHBOARD_HTML = `<!DOCTYPE html>

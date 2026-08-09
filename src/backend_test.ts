@@ -146,8 +146,13 @@ Deno.test("expired pins are dropped on restore", () => {
 
   // A fresh manager must not honor the expired pin on restore.
   const m2 = new BackendManager(config);
-  const pins = (m2 as unknown as { pins: Map<string, { lastSeen: number }> }).pins;
-  assert.strictEqual(pins.has("f:stale"), false, "expired pin must be dropped on restore");
+  const pins =
+    (m2 as unknown as { pins: Map<string, { lastSeen: number }> }).pins;
+  assert.strictEqual(
+    pins.has("f:stale"),
+    false,
+    "expired pin must be dropped on restore",
+  );
 
   Deno.removeSync(dir, { recursive: true });
 });

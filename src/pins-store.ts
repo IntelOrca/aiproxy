@@ -44,7 +44,11 @@ export function joinPath(...parts: string[]): string {
  * Atomically write a JSON value to `<stateDir>/<filename>` (temp file +
  * rename). Silently no-ops when write permission is missing.
  */
-export function writeJsonAtomic(stateDir: string, filename: string, data: unknown): void {
+export function writeJsonAtomic(
+  stateDir: string,
+  filename: string,
+  data: unknown,
+): void {
   const file = join(stateDir, filename);
   const payload = JSON.stringify(data, null, 2);
   try {
@@ -60,7 +64,9 @@ export function writeJsonAtomic(stateDir: string, filename: string, data: unknow
   } catch (err) {
     if (err instanceof Deno.errors.PermissionDenied) return; // persistence not enabled
     console.warn(
-      `[aiproxy] could not persist ${filename}: ${err instanceof Error ? err.message : err}`,
+      `[aiproxy] could not persist ${filename}: ${
+        err instanceof Error ? err.message : err
+      }`,
     );
   }
 }
@@ -74,10 +80,6 @@ export function readJson(stateDir: string, filename: string): unknown {
   }
 }
 
-function pinsFile(stateDir: string): string {
-  return join(stateDir, "pins.json");
-}
-
 /** Load persisted pins. Returns an empty map when nothing is stored yet. */
 export function loadPins(stateDir: string): Map<string, StoredPin> {
   const data = readJson(stateDir, "pins.json") as {
@@ -87,7 +89,10 @@ export function loadPins(stateDir: string): Map<string, StoredPin> {
   if (data?.version !== PIN_FILE_VERSION || !data.pins) return new Map();
   const pins = new Map<string, StoredPin>();
   for (const [key, value] of Object.entries(data.pins)) {
-    if (value && typeof value.backendId === "string" && typeof value.lastSeen === "number") {
+    if (
+      value && typeof value.backendId === "string" &&
+      typeof value.lastSeen === "number"
+    ) {
       pins.set(key, { backendId: value.backendId, lastSeen: value.lastSeen });
     }
   }

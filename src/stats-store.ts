@@ -32,12 +32,16 @@ export function loadStats(stateDir: string): StatsSnapshot {
     backendCounts?: Record<string, number>;
     recent?: unknown[];
   } | null;
-  if (data?.version !== STATS_FILE_VERSION) return { backendCounts: {}, recent: [] };
+  if (data?.version !== STATS_FILE_VERSION) {
+    return { backendCounts: {}, recent: [] };
+  }
 
   const backendCounts: Record<string, number> = {};
   if (data.backendCounts && typeof data.backendCounts === "object") {
     for (const [id, n] of Object.entries(data.backendCounts)) {
-      if (typeof n === "number" && Number.isFinite(n) && n >= 0) backendCounts[id] = n;
+      if (typeof n === "number" && Number.isFinite(n) && n >= 0) {
+        backendCounts[id] = n;
+      }
     }
   }
 

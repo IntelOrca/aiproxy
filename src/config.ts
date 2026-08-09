@@ -97,7 +97,8 @@ export function loadConfig(path = "config.json"): Config {
       : undefined,
     recentRoutes: Number(partial.recentRoutes ?? DEFAULTS.recentRoutes) ||
       DEFAULTS.recentRoutes,
-    shutdownGraceMs: Number(partial.shutdownGraceMs ?? DEFAULTS.shutdownGraceMs) ||
+    shutdownGraceMs:
+      Number(partial.shutdownGraceMs ?? DEFAULTS.shutdownGraceMs) ||
       DEFAULTS.shutdownGraceMs,
   };
 }
