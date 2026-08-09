@@ -26,7 +26,7 @@ if defined SANDBOX goto :sandbox
 if defined CONFIG set "CONFIG_ARG=--config %CONFIG%"
 if defined PORT   set "PORT_ARG=--port %PORT%"
 echo [aiproxy] router%CONFIG_ARG%%PORT_ARG%
-deno run --allow-net --allow-read --allow-env main.ts %CONFIG_ARG% %PORT_ARG%
+deno run --allow-net --allow-read --allow-write --allow-env main.ts %CONFIG_ARG% %PORT_ARG%
 goto :eof
 
 :sandbox

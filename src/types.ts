@@ -38,4 +38,9 @@ export interface Config {
   retryStatusCodes?: number[];
   /** Also fail over when an upstream error body mentions rate limiting / quota (default true) */
   retryOnLimitMessage?: boolean;
+  /**
+   * Directory for persisted state (session pins). Defaults to the platform
+   * state dir: %LOCALAPPDATA%\aiproxy (Windows) or ~/.cache/aiproxy (elsewhere).
+   */
+  stateDir?: string;
 }

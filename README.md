@@ -16,8 +16,8 @@ backend so provider prompt-caching actually pays off.
 | `aiproxy.bat --config config.alt.json`     | Router using another config file                        |
 | `aiproxy.bat -p 9090`                      | Router with the port from config overridden to 9090     |
 
-Router mode needs `--allow-net --allow-read`; sandbox mode needs `--allow-write` (request log)
-too — both are wired up in the `.bat`.
+Router mode needs `--allow-net --allow-read --allow-write` (write is for persisting session
+pins); sandbox mode needs `--allow-write` (request log) too — both are wired up in the `.bat`.
 
 ## Why sticky routing (your caching question)
 
@@ -122,6 +122,7 @@ copilot
 | `models`                | proxied        | Static `/v1/models` list (see below).                    |
 | `modelMap`              | `{}`           | Client model → backend model rewrites (see below).       |
 | `apiKeys`               | `[]`           | Client API keys required on incoming requests.           |
+| `stateDir`              | platform dir   | Directory for persisted session pins (see below).        |
 
 ### What is `models` for?
 
@@ -187,6 +188,20 @@ Point Copilot CLI at it with `COPILOT_PROVIDER_API_KEY=client-key-1`. When `apiK
 configured, the client's key is **not** forwarded upstream (it's the router's credential); use
 per-backend `apiKey` if backends need their own keys. The dashboard (`/` and `/api/status`)
 stays open on localhost so you can watch routing.
+
+### Session pins survive restarts
+
+Session → backend pins are persisted to a JSON file so a restart doesn't scatter every
+conversation across new backends (and lose all the warm prompt caches):
+
+- **Windows:** `%LOCALAPPDATA%\aiproxy\pins.json`
+- **Linux/macOS:** `$XDG_CACHE_HOME/aiproxy/pins.json` or `~/.cache/aiproxy/pins.json`
+
+Point it elsewhere with `"stateDir": "/path/to/dir"` in the config. On startup the router
+restores pins whose backend still exists in the config and whose `lastSeen` is newer than
+`sessionTtlMs`; expired or orphaned pins are dropped. The router needs `--allow-write` for
+this — already granted in `aiproxy.bat` and `deno task start`. Writes are debounced and
+atomic (temp file + rename).
 
 ## Tests
 

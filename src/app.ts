@@ -18,6 +18,18 @@ export function startAiproxy(config: Config): void {
   const manager = new BackendManager(config);
   manager.startHealthChecks();
 
+  // Flush persisted session pins on shutdown.
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    try {
+      Deno.addSignalListener(sig, () => {
+        manager.stop();
+        Deno.exit(0);
+      });
+    } catch {
+      // Signal listeners not supported on this platform.
+    }
+  }
+
   const backendCounts = new Map<string, number>(config.backends.map((b) => [b.id, 0]));
   const recent: RoutingEntry[] = [];
 

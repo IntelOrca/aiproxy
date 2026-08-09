@@ -1,13 +1,9 @@
 import type { Config } from "./types.ts";
+import { defaultStateDir, loadPins, savePins, type StoredPin } from "./pins-store.ts";
 
 interface BackendState {
   config: Config["backends"][number];
   healthy: boolean;
-}
-
-interface SessionPin {
-  backendId: string;
-  lastSeen: number;
 }
 
 /** Append a path to an OpenAI-compatible API root, preserving any base prefix. */
@@ -17,20 +13,70 @@ export function withPath(baseUrl: string, path: string): string {
 
 export class BackendManager {
   private states: BackendState[];
-  private pins = new Map<string, SessionPin>();
+  private pins = new Map<string, StoredPin>();
   private timer: ReturnType<typeof setInterval> | undefined;
+  private saveTimer: ReturnType<typeof setTimeout> | undefined;
+  private dirty = false;
+  private pinsDir: string;
 
   constructor(private config: Config) {
     this.states = config.backends.map((b) => ({ config: b, healthy: true }));
+    this.pinsDir = config.stateDir ?? defaultStateDir();
+    this.restorePins();
+  }
+
+  /** Load persisted pins for backends that still exist, dropping expired ones. */
+  private restorePins(): void {
+    const validIds = new Set(this.config.backends.map((b) => b.id));
+    const now = Date.now();
+    let restored = 0;
+    for (const [key, pin] of loadPins(this.pinsDir)) {
+      if (!validIds.has(pin.backendId)) continue;
+      if (now - pin.lastSeen > this.config.sessionTtlMs) continue;
+      this.pins.set(key, pin);
+      restored++;
+    }
+    if (restored > 0) {
+      console.log(`[aiproxy] restored ${restored} session pin(s) from ${this.pinsDir}`);
+    }
+  }
+
+  /** Schedule a persisted write of the current pins (debounced). */
+  private persistSoon(): void {
+    this.dirty = true;
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined;
+      this.flushPins();
+    }, 500);
+  }
+
+  /** Write pins to disk if anything changed. */
+  private flushPins(): void {
+    if (!this.dirty) return;
+    this.dirty = false;
+    savePins(this.pinsDir, this.pins);
   }
 
   startHealthChecks(): void {
     this.checkAll();
-    this.timer = setInterval(() => this.checkAll(), this.config.healthCheckIntervalMs);
+    this.timer = setInterval(() => {
+      this.checkAll();
+      // Opportunistically flush any pending pin changes.
+      this.flushPins();
+    }, this.config.healthCheckIntervalMs);
   }
 
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = undefined;
+    }
+    this.flushPins();
   }
 
   private async checkOne(state: BackendState): Promise<void> {
@@ -88,6 +134,7 @@ export class BackendManager {
         // Preferred backend is healthy and not excluded — stick with it.
         const pin = this.pins.get(sessionKey)!;
         pin.lastSeen = Date.now();
+        this.persistSoon();
         return pinned;
       }
       const pinnedHealthy = this.states.find((s) => s.config.id === pinnedId)?.healthy;
@@ -99,12 +146,14 @@ export class BackendManager {
       }
       // Pinned backend is down — drop the pin and pick fresh below.
       this.pins.delete(sessionKey);
+      this.persistSoon();
     }
 
     const chosen = this.weightedPick(pool);
     if (this.config.sticky !== false && sessionKey) {
       this.pins.set(sessionKey, { backendId: chosen.config.id, lastSeen: Date.now() });
       this.evictPins();
+      this.persistSoon();
     }
     return chosen;
   }
@@ -133,6 +182,7 @@ export class BackendManager {
   pinTo(sessionKey: string, backendId: string): void {
     if (this.config.sticky === false) return;
     this.pins.set(sessionKey, { backendId, lastSeen: Date.now() });
+    this.persistSoon();
   }
 
   /** Mark a backend unhealthy after a failed forward. */

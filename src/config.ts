@@ -63,5 +63,8 @@ export function loadConfig(path = "config.json"): Config {
       ? partial.retryStatusCodes.map(Number).filter((n: number) => Number.isFinite(n))
       : DEFAULTS.retryStatusCodes,
     retryOnLimitMessage: partial.retryOnLimitMessage ?? DEFAULTS.retryOnLimitMessage,
+    stateDir: typeof partial.stateDir === "string" && partial.stateDir
+      ? partial.stateDir
+      : undefined,
   };
 }

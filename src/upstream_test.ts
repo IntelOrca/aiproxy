@@ -31,6 +31,7 @@ function makeConfig(
     sessionTtlMs: 60_000,
     upstreamTimeoutMs: 5_000,
     maxRetries: 1,
+    stateDir: Deno.makeTempDirSync({ prefix: "aiproxy-upstream-" }),
     ...overrides,
   };
 }
@@ -206,6 +207,7 @@ Deno.test("backend apiKey is sent as Bearer to the backend", async () => {
     sessionTtlMs: 60_000,
     upstreamTimeoutMs: 5_000,
     maxRetries: 0,
+    stateDir: Deno.makeTempDirSync({ prefix: "aiproxy-api-" }),
   } as Config;
   const manager = new BackendManager(config);
 
@@ -241,6 +243,7 @@ Deno.test("client auth key is stripped upstream when router apiKeys are set", as
     upstreamTimeoutMs: 5_000,
     maxRetries: 0,
     apiKeys: ["router-secret"],
+    stateDir: Deno.makeTempDirSync({ prefix: "aiproxy-api-" }),
   } as Config;
   const manager = new BackendManager(config);
 
