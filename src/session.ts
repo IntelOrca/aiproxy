@@ -14,25 +14,30 @@
  */
 export async function sessionKeyFromBody(
   req: Request,
-  body: any,
+  body: unknown,
 ): Promise<string | undefined> {
   const header = req.headers.get("x-session-id");
   if (header) return "h:" + header;
 
-  if (body && typeof body === "object") {
-    if (typeof body.session_id === "string" && body.session_id) {
-      return "b:" + body.session_id;
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const obj = body as Record<string, unknown>;
+    if (typeof obj.session_id === "string" && obj.session_id) {
+      return "b:" + obj.session_id;
     }
-    if (typeof body.thread_id === "string" && body.thread_id) {
-      return "b:" + body.thread_id;
+    if (typeof obj.thread_id === "string" && obj.thread_id) {
+      return "b:" + obj.thread_id;
     }
-    if (Array.isArray(body.messages)) {
-      const firstUser = body.messages.find((m: any) => m && m.role === "user");
+    if (Array.isArray(obj.messages)) {
+      const firstUser = obj.messages.find(
+        (m: unknown): m is Record<string, unknown> =>
+          !!m && typeof m === "object" && !Array.isArray(m) &&
+          (m as Record<string, unknown>).role === "user",
+      );
       if (firstUser) {
         const content = typeof firstUser.content === "string"
           ? firstUser.content
           : JSON.stringify(firstUser.content ?? "");
-        const model = typeof body.model === "string" ? body.model : "";
+        const model = typeof obj.model === "string" ? obj.model : "";
         const hash = await sha256hex(model + "\u0000" + content);
         return "f:" + hash.slice(0, 24);
       }
@@ -44,5 +49,6 @@ export async function sessionKeyFromBody(
 async function sha256hex(input: string): Promise<string> {
   const data = new TextEncoder().encode(input);
   const digest = await crypto.subtle.digest("SHA-256", data);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }

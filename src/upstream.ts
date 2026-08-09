@@ -28,7 +28,7 @@ const RATE_LIMIT_RE =
 
 export async function forwardWithRetry(
   req: Request,
-  body: any,
+  body: unknown,
   sessionKey: string | undefined,
   manager: BackendManager,
   config: Config,
@@ -47,7 +47,9 @@ export async function forwardWithRetry(
       response = await forwardOnce(req, body, state.config, config);
     } catch (err) {
       console.warn(
-        `[aiproxy] backend ${state.config.id} failed: ${err instanceof Error ? err.message : err}`,
+        `[aiproxy] backend ${state.config.id} failed: ${
+          err instanceof Error ? err.message : err
+        }`,
       );
       manager.markDown(state.config.id);
       if (attempt < maxAttempts - 1 && sessionKey) {
@@ -75,7 +77,11 @@ export async function forwardWithRetry(
     // backend that actually handled it, so the warm prompt cache there is
     // reused next turn instead of bouncing back to the rate-limited one.
     if (attempt > 0 && sessionKey) manager.pinTo(sessionKey, state.config.id);
-    return { response, backendId: state.config.id, endpoint: state.config.baseUrl };
+    return {
+      response,
+      backendId: state.config.id,
+      endpoint: state.config.baseUrl,
+    };
   }
 
   return {
@@ -112,7 +118,7 @@ async function isRateLimited(
 
 async function forwardOnce(
   req: Request,
-  body: any,
+  body: unknown,
   backend: Config["backends"][number],
   config: Config,
 ): Promise<Response> {
@@ -144,9 +150,12 @@ async function forwardOnce(
   }
 
   // Optional model rewrite: per-backend override wins, then global map.
-  if (body && typeof body === "object" && typeof body.model === "string") {
-    const mapped = backend.model ?? config.modelMap?.[body.model];
-    if (mapped) body = { ...body, model: mapped };
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const obj = body as Record<string, unknown>;
+    if (typeof obj.model === "string") {
+      const mapped = backend.model ?? config.modelMap?.[obj.model];
+      if (mapped) body = { ...obj, model: mapped };
+    }
   }
 
   const upstream = await fetch(target, {

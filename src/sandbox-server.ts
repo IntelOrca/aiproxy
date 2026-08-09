@@ -54,7 +54,9 @@ export function startSandboxServer(opts: SandboxOptions): void {
             finish_reason: null,
           }],
         };
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`),
+        );
         const done = {
           id: "chatcmpl-sandbox",
           object: "chat.completion.chunk",
@@ -85,15 +87,25 @@ export function startSandboxServer(opts: SandboxOptions): void {
       // ignore
     }
     const sizeKb = (bodyText.length / 1024).toFixed(1);
-    console.log(`[sandbox:${opts.port}] ${req.method} ${url.pathname}${url.search} (${sizeKb} KB)`);
-    await log(`[${new Date().toISOString()}] ${req.method} ${url.pathname}${url.search} (${sizeKb} KB)`);
+    console.log(
+      `[sandbox:${opts.port}] ${req.method} ${url.pathname}${url.search} (${sizeKb} KB)`,
+    );
+    await log(
+      `[${
+        new Date().toISOString()
+      }] ${req.method} ${url.pathname}${url.search} (${sizeKb} KB)`,
+    );
 
     if (req.method === "OPTIONS") return new Response(null, { status: 204 });
 
     if (req.method === "GET" && url.pathname.endsWith("/models")) {
       return Response.json({
         object: "list",
-        data: models.map((id) => ({ id, object: "model", owned_by: "sandbox" })),
+        data: models.map((id) => ({
+          id,
+          object: "model",
+          owned_by: "sandbox",
+        })),
       });
     }
 
@@ -101,9 +113,12 @@ export function startSandboxServer(opts: SandboxOptions): void {
       return error(404, "not found");
     }
 
-    let parsed: any = null;
+    let parsed: Record<string, unknown> | null = null;
     try {
-      parsed = bodyText ? JSON.parse(bodyText) : null;
+      const json: unknown = bodyText ? JSON.parse(bodyText) : null;
+      if (json && typeof json === "object" && !Array.isArray(json)) {
+        parsed = json as Record<string, unknown>;
+      }
     } catch {
       return error(400, "invalid JSON body");
     }
@@ -111,10 +126,13 @@ export function startSandboxServer(opts: SandboxOptions): void {
     const model = parsed?.model;
     if (typeof model !== "string" || !model) return error(400, "missing model");
     if (!models.includes(model)) {
-      return error(404, `The model '${model}' does not exist or you do not have access to it.`);
+      return error(
+        404,
+        `The model '${model}' does not exist or you do not have access to it.`,
+      );
     }
 
-    if (parsed.stream === false) {
+    if (parsed?.stream === false) {
       return Response.json({
         id: "chatcmpl-sandbox",
         object: "chat.completion",

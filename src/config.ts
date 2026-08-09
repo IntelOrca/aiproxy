@@ -15,21 +15,37 @@ const DEFAULTS = {
 };
 
 export function loadConfig(path = "config.json"): Config {
-  let partial: any = {};
+  let partial: Record<string, unknown> = {};
   try {
-    partial = JSON.parse(Deno.readTextFileSync(path));
+    const parsed: unknown = JSON.parse(Deno.readTextFileSync(path));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      partial = parsed as Record<string, unknown>;
+    }
   } catch {
     console.warn(`[aiproxy] ${path} not found or invalid; using defaults.`);
   }
 
-  const backends: BackendConfig[] = (partial.backends ?? []).map((b: any, i: number) => ({
-    id: typeof b.id === "string" && b.id ? b.id : `backend-${i + 1}`,
-    baseUrl: String(b.baseUrl ?? "http://127.0.0.1:3456/v1").replace(/\/+$/, ""),
-    weight: Number(b.weight ?? 1) || 1,
-    model: typeof b.model === "string" ? b.model : undefined,
-    apiKey: typeof b.apiKey === "string" && b.apiKey ? b.apiKey : undefined,
-    priority: typeof b.priority === "number" ? b.priority : undefined,
-  }));
+  const rawBackends = Array.isArray(partial.backends)
+    ? partial.backends as unknown[]
+    : [];
+  const backends: BackendConfig[] = rawBackends.map((b: unknown, i: number) => {
+    const be = b && typeof b === "object" && !Array.isArray(b)
+      ? b as Record<string, unknown>
+      : {};
+    return {
+      id: typeof be.id === "string" && be.id ? be.id : `backend-${i + 1}`,
+      baseUrl: String(be.baseUrl ?? "http://127.0.0.1:3456/v1").replace(
+        /\/+$/,
+        "",
+      ),
+      weight: Number(be.weight ?? 1) || 1,
+      model: typeof be.model === "string" ? be.model : undefined,
+      apiKey: typeof be.apiKey === "string" && be.apiKey
+        ? be.apiKey
+        : undefined,
+      priority: typeof be.priority === "number" ? be.priority : undefined,
+    };
+  });
 
   if (backends.length === 0) {
     console.warn(
@@ -45,16 +61,23 @@ export function loadConfig(path = "config.json"): Config {
   return {
     port: Number(partial.port ?? DEFAULTS.port) || DEFAULTS.port,
     backends,
-    sticky: partial.sticky ?? DEFAULTS.sticky,
-    healthCheckIntervalMs: Number(partial.healthCheckIntervalMs ?? DEFAULTS.healthCheckIntervalMs) ||
+    sticky: Boolean(partial.sticky ?? DEFAULTS.sticky),
+    healthCheckIntervalMs:
+      Number(partial.healthCheckIntervalMs ?? DEFAULTS.healthCheckIntervalMs) ||
       DEFAULTS.healthCheckIntervalMs,
-    healthCheckTimeoutMs: Number(partial.healthCheckTimeoutMs ?? DEFAULTS.healthCheckTimeoutMs) ||
+    healthCheckTimeoutMs:
+      Number(partial.healthCheckTimeoutMs ?? DEFAULTS.healthCheckTimeoutMs) ||
       DEFAULTS.healthCheckTimeoutMs,
-    sessionTtlMs: Number(partial.sessionTtlMs ?? DEFAULTS.sessionTtlMs) || DEFAULTS.sessionTtlMs,
-    upstreamTimeoutMs: Number(partial.upstreamTimeoutMs ?? DEFAULTS.upstreamTimeoutMs) ||
+    sessionTtlMs: Number(partial.sessionTtlMs ?? DEFAULTS.sessionTtlMs) ||
+      DEFAULTS.sessionTtlMs,
+    upstreamTimeoutMs:
+      Number(partial.upstreamTimeoutMs ?? DEFAULTS.upstreamTimeoutMs) ||
       DEFAULTS.upstreamTimeoutMs,
-    maxRetries: Number(partial.maxRetries ?? DEFAULTS.maxRetries) || DEFAULTS.maxRetries,
-    models: Array.isArray(partial.models) ? partial.models.map(String) : undefined,
+    maxRetries: Number(partial.maxRetries ?? DEFAULTS.maxRetries) ||
+      DEFAULTS.maxRetries,
+    models: Array.isArray(partial.models)
+      ? partial.models.map(String)
+      : undefined,
     modelMap: partial.modelMap && typeof partial.modelMap === "object"
       ? partial.modelMap as Record<string, string>
       : undefined,
@@ -62,9 +85,13 @@ export function loadConfig(path = "config.json"): Config {
       ? partial.apiKeys.map(String).filter((k: string) => k.length > 0)
       : undefined,
     retryStatusCodes: Array.isArray(partial.retryStatusCodes)
-      ? partial.retryStatusCodes.map(Number).filter((n: number) => Number.isFinite(n))
+      ? partial.retryStatusCodes.map(Number).filter((n: number) =>
+        Number.isFinite(n)
+      )
       : DEFAULTS.retryStatusCodes,
-    retryOnLimitMessage: partial.retryOnLimitMessage ?? DEFAULTS.retryOnLimitMessage,
+    retryOnLimitMessage: Boolean(
+      partial.retryOnLimitMessage ?? DEFAULTS.retryOnLimitMessage,
+    ),
     stateDir: typeof partial.stateDir === "string" && partial.stateDir
       ? partial.stateDir
       : undefined,

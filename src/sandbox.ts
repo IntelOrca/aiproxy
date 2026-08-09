@@ -5,7 +5,7 @@
 //   PORT  router port (default 6060); fake backends listen on PORT+1..+3
 
 import { startAiproxy } from "./app.ts";
-import { startSandboxServer, DEFAULT_MODELS } from "./sandbox-server.ts";
+import { DEFAULT_MODELS, startSandboxServer } from "./sandbox-server.ts";
 import type { Config } from "./types.ts";
 
 const port = Number(Deno.env.get("PORT") ?? 6060);
@@ -32,6 +32,8 @@ const config: Config = {
 };
 
 console.log(
-  `[aiproxy-sandbox] fake backends on ${backendPorts.map((p) => `127.0.0.1:${p}`).join(", ")}`,
+  `[aiproxy-sandbox] fake backends on ${
+    backendPorts.map((p) => `127.0.0.1:${p}`).join(", ")
+  }`,
 );
 startAiproxy(config);

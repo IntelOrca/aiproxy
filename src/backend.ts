@@ -97,7 +97,12 @@ export class BackendManager {
     await Promise.all(this.states.map((s) => this.checkOne(s)));
   }
 
-  healthReport(): { id: string; baseUrl: string; healthy: boolean; priority?: number }[] {
+  healthReport(): {
+    id: string;
+    baseUrl: string;
+    healthy: boolean;
+    priority?: number;
+  }[] {
     return this.states.map((s) => ({
       id: s.config.id,
       baseUrl: s.config.baseUrl,
@@ -121,7 +126,9 @@ export class BackendManager {
     sessionKey: string | undefined,
     exclude?: Set<string>,
   ): BackendState | null {
-    const pool = this.states.filter((s) => s.healthy && !exclude?.has(s.config.id));
+    const pool = this.states.filter((s) =>
+      s.healthy && !exclude?.has(s.config.id)
+    );
     if (pool.length === 0) return null;
 
     const pinnedId = this.config.sticky !== false && sessionKey
@@ -137,7 +144,8 @@ export class BackendManager {
         this.persistSoon();
         return pinned;
       }
-      const pinnedHealthy = this.states.find((s) => s.config.id === pinnedId)?.healthy;
+      const pinnedHealthy = this.states.find((s) => s.config.id === pinnedId)
+        ?.healthy;
       if (pinnedHealthy) {
         // Excluded for this request (e.g. rate-limited) — use another backend
         // without touching the pin. upstream re-pins the session to whichever
@@ -151,7 +159,10 @@ export class BackendManager {
 
     const chosen = this.weightedPick(pool);
     if (this.config.sticky !== false && sessionKey) {
-      this.pins.set(sessionKey, { backendId: chosen.config.id, lastSeen: Date.now() });
+      this.pins.set(sessionKey, {
+        backendId: chosen.config.id,
+        lastSeen: Date.now(),
+      });
       this.evictPins();
       this.persistSoon();
     }
@@ -161,7 +172,8 @@ export class BackendManager {
   private weightedPick(pool: BackendState[]): BackendState {
     // Prefer the lowest-priority group (backends without a priority are equal
     // and rank below any explicitly prioritized backend).
-    const eff = (s: BackendState) => s.config.priority ?? Number.MAX_SAFE_INTEGER;
+    const eff = (s: BackendState) =>
+      s.config.priority ?? Number.MAX_SAFE_INTEGER;
     const minPriority = Math.min(...pool.map(eff));
     const candidates = pool.filter((s) => eff(s) === minPriority);
 

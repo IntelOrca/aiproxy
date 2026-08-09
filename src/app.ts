@@ -81,20 +81,26 @@ export function startAiproxy(config: Config): void {
       // Signal listeners not supported on this platform.
     }
   }
-
   async function handleModels(): Promise<Response> {
     if (config.models) {
       return Response.json({
         object: "list",
-        data: config.models.map((id) => ({ id, object: "model", owned_by: "aiproxy" })),
+        data: config.models.map((id) => ({
+          id,
+          object: "model",
+          owned_by: "aiproxy",
+        })),
       });
     }
     const backend = manager.pick(undefined);
     if (backend) {
       try {
-        const upstream = await fetch(withPath(backend.config.baseUrl, "/models"), {
-          signal: AbortSignal.timeout(3_000),
-        });
+        const upstream = await fetch(
+          withPath(backend.config.baseUrl, "/models"),
+          {
+            signal: AbortSignal.timeout(3_000),
+          },
+        );
         if (upstream.ok) {
           return new Response(upstream.body, {
             status: upstream.status,
@@ -162,35 +168,55 @@ export function startAiproxy(config: Config): void {
       if (req.method === "OPTIONS") return new Response(null, { status: 204 });
 
       if (req.method === "GET") {
-        if (url.pathname === "/" || url.pathname === "/index.html") return dashboardHtml();
+        if (url.pathname === "/" || url.pathname === "/index.html") {
+          return dashboardHtml();
+        }
         if (url.pathname === "/api/status") return statusJson();
         if (url.pathname === "/models" || url.pathname === "/v1/models") {
-          if (!clientAuthorized(req)) return jsonError(401, "invalid or missing API key");
+          if (!clientAuthorized(req)) {
+            return jsonError(401, "invalid or missing API key");
+          }
           return await handleModels();
         }
         return jsonError(404, `no route for GET ${url.pathname}`);
       }
 
       if (req.method === "POST" && url.pathname.endsWith("/chat/completions")) {
-        if (!clientAuthorized(req)) return jsonError(401, "invalid or missing API key");
+        if (!clientAuthorized(req)) {
+          return jsonError(401, "invalid or missing API key");
+        }
         const text = await req.text();
-        let body: any;
+        let body: unknown;
         try {
           body = JSON.parse(text);
         } catch {
           return jsonError(400, "invalid JSON body");
         }
+        const bodyObj: Record<string, unknown> =
+          body && typeof body === "object" &&
+            !Array.isArray(body)
+            ? body as Record<string, unknown>
+            : {};
 
         const sessionKey = await sessionKeyFromBody(req, body);
-        const result = await forwardWithRetry(req, body, sessionKey, manager, config);
+        const result = await forwardWithRetry(
+          req,
+          body,
+          sessionKey,
+          manager,
+          config,
+        );
         const ms = Math.round(performance.now() - t0);
 
         if (result.backendId !== "none") {
-          backendCounts.set(result.backendId, (backendCounts.get(result.backendId) ?? 0) + 1);
+          backendCounts.set(
+            result.backendId,
+            (backendCounts.get(result.backendId) ?? 0) + 1,
+          );
           recent.unshift({
             at: new Date().toISOString(),
             sessionId: sessionKey ?? "-",
-            model: body?.model ?? "-",
+            model: String(bodyObj.model ?? "-"),
             backendId: result.backendId,
             endpoint: result.endpoint,
             status: result.response.status,
@@ -201,9 +227,15 @@ export function startAiproxy(config: Config): void {
         }
 
         console.log(
-          `[aiproxy] ${req.method} ${url.pathname} session=${sessionKey ?? "-"} ` +
-            `-> ${result.backendId}${result.endpoint ? ` (${result.endpoint})` : ""} ` +
-            `model=${body?.model ?? "-"} status=${result.response.status} ${ms}ms`,
+          `[aiproxy] ${req.method} ${url.pathname} session=${
+            sessionKey ?? "-"
+          } ` +
+            `-> ${result.backendId}${
+              result.endpoint ? ` (${result.endpoint})` : ""
+            } ` +
+            `model=${
+              String(bodyObj.model ?? "-")
+            } status=${result.response.status} ${ms}ms`,
         );
         return result.response;
       }
