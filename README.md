@@ -89,15 +89,16 @@ copilot
   first while healthy. Only when it's down or rate-limited do other backends get used. Backends
   without a `priority` rank equally and only run when no prioritized backend is healthy.
 - **Sticky sessions**: once a conversation is routed, it stays on that backend until it goes
-  unhealthy or the pin expires (`sessionTtlMs`, 30 min default). A rate limit does *not* move
-  the pin — the preferred backend is tried first again on the next turn.
+  unhealthy or the pin expires (`sessionTtlMs`, 30 min default).
 - **Health checks**: `GET {backend}/models` every `healthCheckIntervalMs`; any HTTP response
   counts as reachable. Failed forwards also mark a backend down.
 - **Retry/failover**: on transport errors, retry on another healthy backend (up to
   `maxRetries`), re-pinning the session. A "limit reached" response (HTTP 429/529, or an error
   body mentioning rate limit / quota, configurable via `retryStatusCodes` /
-  `retryOnLimitMessage`) also fails over to another backend for that request, without marking
-  the backend down or stealing its pin.
+  `retryOnLimitMessage`) also fails over to another backend for that request, and the session
+  is **re-pinned to whichever backend actually served it** — so the warm prompt cache there is
+  reused next turn instead of bouncing back to the rate-limited one. A rate limit never marks a
+  backend down.
 - **Model mapping**: optionally rewrite the client's model name per backend (`backend.model`)
   or globally (`modelMap`).
 - **Client auth**: if `apiKeys` is configured, every request to `/v1/chat/completions` and
@@ -164,11 +165,12 @@ Give your preferred backend `priority: 0` and the others `priority: 1`:
 ]
 ```
 
-account-1 is always tried first. If it responds "limit reached" (429, or an error body with
-rate-limit/quota wording) the router retries the request on account-2 or account-3. The
-conversation's pin stays on account-1, so the next turn tries account-1 again first — exactly
-"primary until it's exhausted, then fallback". Bump `maxRetries` to control how many fallbacks
-run per request.
+account-1 is always tried first by new conversations. If it responds "limit reached" (429, or
+an error body with rate-limit/quota wording) the router retries the request on account-2 or
+account-3 and **re-pins that conversation to whichever one served it** — so the next turn
+reuses that backend's warm cache instead of paying full prefix cost again on account-1. A
+fresh conversation still starts on account-1 (it's the priority). Bump `maxRetries` to control
+how many fallbacks run per request.
 
 ### Backend vs client API keys
 

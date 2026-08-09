@@ -93,7 +93,8 @@ export class BackendManager {
       const pinnedHealthy = this.states.find((s) => s.config.id === pinnedId)?.healthy;
       if (pinnedHealthy) {
         // Excluded for this request (e.g. rate-limited) — use another backend
-        // but keep the pin so the preferred one is tried again next time.
+        // without touching the pin. upstream re-pins the session to whichever
+        // backend actually serves the request.
         return this.weightedPick(pool);
       }
       // Pinned backend is down — drop the pin and pick fresh below.

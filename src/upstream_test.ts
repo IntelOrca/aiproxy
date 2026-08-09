@@ -72,7 +72,7 @@ Deno.test("rate-limit 429 fails over to backup without marking primary down", as
   await backup.close();
 });
 
-Deno.test("rate-limit failover keeps the pin on the primary (tried first next turn)", async () => {
+Deno.test("rate-limit failover re-pins the session to the backend that served", async () => {
   let primaryHits = 0;
   let backupHits = 0;
   const primary = startTestServer(() => {
@@ -92,11 +92,14 @@ Deno.test("rate-limit failover keeps the pin on the primary (tried first next tu
   const r1 = await forwardWithRetry(chatRequest(primary.port), body, "f:keep", manager, config);
   assert.strictEqual(r1.backendId, "backup");
   assert.strictEqual(primaryHits, 1);
+  assert.strictEqual(backupHits, 1);
 
-  // Turn 2: same session — the primary must be tried FIRST again.
+  // Turn 2: same session is now pinned to the backup (cache affinity) — the
+  // primary must NOT be re-tried; the warm cache on the backup is reused.
   const r2 = await forwardWithRetry(chatRequest(primary.port), body, "f:keep", manager, config);
-  assert.strictEqual(primaryHits, 2, "primary should be retried on the next turn");
   assert.strictEqual(r2.backendId, "backup");
+  assert.strictEqual(primaryHits, 1, "primary must not be retried once the session was pinned away");
+  assert.strictEqual(backupHits, 2);
 
   manager.stop();
   await primary.close();
@@ -121,6 +124,38 @@ Deno.test("rate-limit message in error body triggers failover", async () => {
 
   assert.strictEqual(result.backendId, "backup");
   assert.strictEqual(result.response.status, 200);
+
+  manager.stop();
+  await primary.close();
+  await backup.close();
+});
+
+Deno.test("new sessions still try the primary first, then pin to the serving fallback", async () => {
+  let primaryHits = 0;
+  let backupHits = 0;
+  const primary = startTestServer(() => {
+    primaryHits++;
+    return Response.json({ error: { message: "rate limit" } }, { status: 429 });
+  });
+  const backup = startTestServer(() => {
+    backupHits++;
+    return Response.json({ ok: true }, { status: 200 });
+  });
+
+  const config = makeConfig(primary.port, backup.port);
+  const manager = new BackendManager(config);
+  const mkBody = (m: string) => ({ model: "gpt-4o", messages: [{ role: "user", content: m }] });
+
+  // Session A rate-limits on primary and gets pinned to backup.
+  await forwardWithRetry(chatRequest(primary.port), mkBody("session a"), "f:a", manager, config);
+  await forwardWithRetry(chatRequest(primary.port), mkBody("session a"), "f:a", manager, config);
+  assert.strictEqual(primaryHits, 1, "session a stays on backup after failover");
+
+  // Session B (new) still tries the primary first (priority 0), then fails
+  // over and pins to the backup too.
+  await forwardWithRetry(chatRequest(primary.port), mkBody("session b"), "f:b", manager, config);
+  assert.strictEqual(primaryHits, 2, "a fresh session still tries the primary first");
+  assert.strictEqual(backupHits, 3); // A turn1 failover, A turn2 direct, B failover
 
   manager.stop();
   await primary.close();

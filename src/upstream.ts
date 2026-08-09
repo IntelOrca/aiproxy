@@ -42,21 +42,9 @@ export async function forwardWithRetry(
     const state = manager.pick(sessionKey, tried);
     if (!state) break;
     tried.add(state.config.id);
+    let response: Response;
     try {
-      const response = await forwardOnce(req, body, state.config, config);
-      if (
-        attempt < maxAttempts - 1 &&
-        await isRateLimited(response, retryCodes, scanBody)
-      ) {
-        // "Limit reached": fail over to another backend for THIS request. Do
-        // not markDown (a rate limit isn't "down") and do not re-pin — the
-        // session should keep trying its preferred backend next time.
-        console.warn(
-          `[aiproxy] backend ${state.config.id} limit reached (status ${response.status}); failing over`,
-        );
-        continue;
-      }
-      return { response, backendId: state.config.id, endpoint: state.config.baseUrl };
+      response = await forwardOnce(req, body, state.config, config);
     } catch (err) {
       console.warn(
         `[aiproxy] backend ${state.config.id} failed: ${err instanceof Error ? err.message : err}`,
@@ -67,7 +55,27 @@ export async function forwardWithRetry(
         const next = manager.pick(sessionKey, tried);
         if (next) manager.pinTo(sessionKey, next.config.id);
       }
+      continue;
     }
+
+    if (
+      attempt < maxAttempts - 1 &&
+      await isRateLimited(response, retryCodes, scanBody)
+    ) {
+      // "Limit reached": fail over to another backend for THIS request. Do not
+      // markDown — a rate limit isn't "down". The session is re-pinned to the
+      // backend that actually serves it (see below).
+      console.warn(
+        `[aiproxy] backend ${state.config.id} limit reached (status ${response.status}); failing over`,
+      );
+      continue;
+    }
+
+    // This request was served after a retry — pin the conversation to the
+    // backend that actually handled it, so the warm prompt cache there is
+    // reused next turn instead of bouncing back to the rate-limited one.
+    if (attempt > 0 && sessionKey) manager.pinTo(sessionKey, state.config.id);
+    return { response, backendId: state.config.id, endpoint: state.config.baseUrl };
   }
 
   return {
