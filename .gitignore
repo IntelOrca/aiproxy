@@ -6,3 +6,4 @@ config.json
 
 # Deno cache / runtime
 .deno/
+deno.lock
