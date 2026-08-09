@@ -45,6 +45,8 @@ export interface Config {
   stateDir?: string;
   /** How many recent route entries to keep and persist (default 200) */
   recentRoutes?: number;
+  /** How long to wait for in-flight requests to drain on Ctrl+C/SIGTERM (default 10000ms) */
+  shutdownGraceMs?: number;
 }
 
 /** A single routed request, shown in the dashboard and persisted for restarts. */

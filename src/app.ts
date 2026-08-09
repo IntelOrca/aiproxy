@@ -41,14 +41,41 @@ export function startAiproxy(config: Config): void {
     }, 500);
   }
 
-  // Flush persisted state on shutdown.
+  let server: ReturnType<typeof Deno.serve> | undefined;
+  let shuttingDown = false;
+
+  /**
+   * Graceful shutdown: stop accepting new connections, let in-flight requests
+   * finish (bounded by shutdownGraceMs), then flush persisted state and exit 0.
+   */
+  async function shutdown(): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    const graceMs = Math.max(0, config.shutdownGraceMs ?? 10_000);
+    console.log(`[aiproxy] shutting down; draining in-flight requests (up to ${graceMs}ms)`);
+    try {
+      if (server) {
+        await Promise.race([
+          server.shutdown(),
+          new Promise<void>((r) => setTimeout(r, graceMs)),
+        ]);
+      }
+    } catch (err) {
+      console.warn(`[aiproxy] drain interrupted: ${err instanceof Error ? err.message : err}`);
+    }
+    if (statsTimer) clearTimeout(statsTimer);
+    persistStats();
+    manager.stop();
+    console.log("[aiproxy] shutdown complete");
+    Deno.exit(0);
+  }
+
+  // Drain in-flight requests and flush persisted state on Ctrl+C / SIGTERM.
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     try {
       Deno.addSignalListener(sig, () => {
-        if (statsTimer) clearTimeout(statsTimer);
-        persistStats();
-        manager.stop();
-        Deno.exit(0);
+        if (shuttingDown) Deno.exit(130); // second signal: force exit
+        void shutdown();
       });
     } catch {
       // Signal listeners not supported on this platform.
@@ -109,6 +136,7 @@ export function startAiproxy(config: Config): void {
         retryOnLimitMessage: config.retryOnLimitMessage ?? true,
         authRequired: Array.isArray(config.apiKeys) && config.apiKeys.length > 0,
         recentRoutes: maxRecent,
+        shutdownGraceMs: config.shutdownGraceMs ?? 10_000,
       },
       models: config.models ?? null,
       backends: manager.healthReport().map((b) => ({
@@ -125,7 +153,8 @@ export function startAiproxy(config: Config): void {
     });
   }
 
-  Deno.serve({ port: config.port, hostname: "127.0.0.1" }, async (req) => {
+  server = Deno.serve({ port: config.port, hostname: "127.0.0.1" }, async (req) => {
+    if (shuttingDown) return jsonError(503, "server is shutting down");
     const url = new URL(req.url);
     const t0 = performance.now();
 

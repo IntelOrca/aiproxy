@@ -11,6 +11,7 @@ const DEFAULTS = {
   retryStatusCodes: [429, 529],
   retryOnLimitMessage: true,
   recentRoutes: 200,
+  shutdownGraceMs: 10_000,
 };
 
 export function loadConfig(path = "config.json"): Config {
@@ -69,5 +70,7 @@ export function loadConfig(path = "config.json"): Config {
       : undefined,
     recentRoutes: Number(partial.recentRoutes ?? DEFAULTS.recentRoutes) ||
       DEFAULTS.recentRoutes,
+    shutdownGraceMs: Number(partial.shutdownGraceMs ?? DEFAULTS.shutdownGraceMs) ||
+      DEFAULTS.shutdownGraceMs,
   };
 }

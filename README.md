@@ -104,6 +104,9 @@ copilot
 - **Client auth**: if `apiKeys` is configured, every request to `/v1/chat/completions` and
   `/v1/models` must carry `Authorization: Bearer <one of the keys>` (else 401). Per-backend
   `apiKey` sets the Authorization header sent upstream.
+- **Graceful shutdown**: on Ctrl+C/SIGTERM the router stops accepting new connections (they
+  get `503`), waits up to `shutdownGraceMs` for in-flight requests to finish, then flushes
+  pins/stats and exits `0`. A second Ctrl+C force-exits immediately.
 
 ## Config
 
@@ -124,6 +127,7 @@ copilot
 | `apiKeys`               | `[]`           | Client API keys required on incoming requests.           |
 | `stateDir`              | platform dir   | Directory for persisted state (pins, stats) — see below. |
 | `recentRoutes`          | `200`          | How many recent route entries to keep and persist.       |
+| `shutdownGraceMs`       | `10000`        | Max time to wait for in-flight requests to drain on Ctrl+C/SIGTERM. |
 
 ### What is `models` for?
 
