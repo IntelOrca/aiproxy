@@ -1,6 +1,10 @@
 import assert from "node:assert";
 import { BackendManager } from "./backend.ts";
-import { forwardWithRetry } from "./upstream.ts";
+import {
+  forwardWithRetry,
+  shouldSendOpencodeSession,
+  upstreamSessionHeaders,
+} from "./upstream.ts";
 import type { Config } from "./types.ts";
 
 interface TestServer {
@@ -341,6 +345,233 @@ Deno.test("client auth key is stripped upstream when router apiKeys are set", as
 
   assert.strictEqual(result.response.status, 200);
   assert.strictEqual(auth, null);
+
+  manager.stop();
+  await backend.close();
+});
+
+Deno.test("shouldSendOpencodeSession matches opencode.ai hostnames only", () => {
+  assert.strictEqual(
+    shouldSendOpencodeSession("https://opencode.ai/zen/go/v1"),
+    true,
+  );
+  assert.strictEqual(
+    shouldSendOpencodeSession("https://opencode.ai/zen/v1"),
+    true,
+  );
+  assert.strictEqual(
+    shouldSendOpencodeSession("https://go.opencode.ai/v1"),
+    true,
+  );
+  assert.strictEqual(
+    shouldSendOpencodeSession("https://OPENCODE.AI/zen/v1"),
+    true,
+  );
+  // Lookalikes must not match.
+  assert.strictEqual(
+    shouldSendOpencodeSession("https://opencode.ai.evil.com/v1"),
+    false,
+  );
+  assert.strictEqual(
+    shouldSendOpencodeSession("https://notopencode.ai/v1"),
+    false,
+  );
+  assert.strictEqual(
+    shouldSendOpencodeSession("https://other-provider.example.com/zen/v1"),
+    false,
+  );
+  assert.strictEqual(
+    shouldSendOpencodeSession("https://openrouter.ai/api/v1"),
+    false,
+  );
+  assert.strictEqual(
+    shouldSendOpencodeSession("http://127.0.0.1:3456/v1"),
+    false,
+  );
+  assert.strictEqual(shouldSendOpencodeSession("not a url"), false);
+});
+
+Deno.test("upstreamSessionHeaders injects both headers for opencode URLs", async () => {
+  const headers = new Headers();
+  await upstreamSessionHeaders(
+    "https://opencode.ai/zen/go/v1",
+    "f:abc123",
+    headers,
+  );
+  assert.strictEqual(headers.get("x-session-id"), "abc123");
+  assert.strictEqual(headers.get("x-opencode-session"), "abc123");
+});
+
+Deno.test("upstreamSessionHeaders injects only x-session-id for other URLs", async () => {
+  const headers = new Headers();
+  await upstreamSessionHeaders(
+    "https://openrouter.ai/api/v1",
+    "h:my-session",
+    headers,
+  );
+  assert.strictEqual(headers.get("x-session-id"), "my-session");
+  assert.strictEqual(headers.get("x-opencode-session"), null);
+});
+
+Deno.test("upstreamSessionHeaders preserves client-provided values", async () => {
+  const headers = new Headers({
+    "x-session-id": "client-val",
+    "x-opencode-session": "client-opencode",
+  });
+  await upstreamSessionHeaders(
+    "https://opencode.ai/zen/go/v1",
+    "f:other",
+    headers,
+  );
+  assert.strictEqual(headers.get("x-session-id"), "client-val");
+  assert.strictEqual(headers.get("x-opencode-session"), "client-opencode");
+});
+
+Deno.test("upstreamSessionHeaders injects nothing without a session key", async () => {
+  const headers = new Headers();
+  await upstreamSessionHeaders(
+    "https://opencode.ai/zen/go/v1",
+    undefined,
+    headers,
+  );
+  assert.strictEqual(headers.get("x-session-id"), null);
+  assert.strictEqual(headers.get("x-opencode-session"), null);
+});
+
+function singleBackendConfig(
+  backend: { id: string; baseUrl: string },
+): Config {
+  return {
+    port: 0,
+    backends: [{
+      id: backend.id,
+      baseUrl: backend.baseUrl,
+      weight: 1,
+    }],
+    sticky: false,
+    healthCheckIntervalMs: 60_000,
+    healthCheckTimeoutMs: 1_000,
+    sessionTtlMs: 60_000,
+    upstreamTimeoutMs: 5_000,
+    maxRetries: 0,
+    stateDir: Deno.makeTempDirSync({ prefix: "aiproxy-session-hdr-" }),
+  } as Config;
+}
+
+Deno.test("fingerprint session key is forwarded as x-session-id upstream", async () => {
+  const seen: Record<string, string | null> = {};
+  const backend = startTestServer((req) => {
+    seen.session = req.headers.get("x-session-id");
+    seen.opencode = req.headers.get("x-opencode-session");
+    return Response.json({ ok: true }, { status: 200 });
+  });
+
+  const config = singleBackendConfig({
+    id: "primary",
+    baseUrl: `http://127.0.0.1:${backend.port}/v1`,
+  });
+  const manager = new BackendManager(config);
+  const result = await forwardWithRetry(
+    chatRequest(backend.port),
+    { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+    "f:abc123",
+    manager,
+    config,
+  );
+
+  assert.strictEqual(result.response.status, 200);
+  assert.strictEqual(seen.session, "abc123");
+  assert.strictEqual(seen.opencode, null);
+
+  manager.stop();
+  await backend.close();
+});
+
+Deno.test("non-opencode backends get x-session-id but not x-opencode-session", async () => {
+  const seen: Record<string, string | null> = {};
+  const backend = startTestServer((req) => {
+    seen.session = req.headers.get("x-session-id");
+    seen.opencode = req.headers.get("x-opencode-session");
+    return Response.json({ ok: true }, { status: 200 });
+  });
+
+  const config = singleBackendConfig({
+    id: "primary",
+    baseUrl: `http://127.0.0.1:${backend.port}/v1`,
+  });
+  const manager = new BackendManager(config);
+  const result = await forwardWithRetry(
+    chatRequest(backend.port),
+    { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+    "h:my-session",
+    manager,
+    config,
+  );
+
+  assert.strictEqual(result.response.status, 200);
+  assert.strictEqual(seen.session, "my-session");
+  assert.strictEqual(seen.opencode, null);
+
+  manager.stop();
+  await backend.close();
+});
+
+Deno.test("client-provided session headers are preserved upstream", async () => {
+  const seen: Record<string, string | null> = {};
+  const backend = startTestServer((req) => {
+    seen.session = req.headers.get("x-session-id");
+    seen.opencode = req.headers.get("x-opencode-session");
+    return Response.json({ ok: true }, { status: 200 });
+  });
+
+  const config = singleBackendConfig({
+    id: "primary",
+    baseUrl: `http://127.0.0.1:${backend.port}/v1`,
+  });
+  const manager = new BackendManager(config);
+  const req = chatRequest(backend.port);
+  req.headers.set("x-session-id", "client-val");
+  req.headers.set("x-opencode-session", "client-opencode");
+  const result = await forwardWithRetry(
+    req,
+    { model: "gpt-4o", messages: [] },
+    "f:other",
+    manager,
+    config,
+  );
+
+  assert.strictEqual(result.response.status, 200);
+  assert.strictEqual(seen.session, "client-val");
+  assert.strictEqual(seen.opencode, "client-opencode");
+
+  manager.stop();
+  await backend.close();
+});
+
+Deno.test("no session key -> no session headers injected", async () => {
+  const seen: Record<string, string | null> = {};
+  const backend = startTestServer((req) => {
+    seen.session = req.headers.get("x-session-id");
+    seen.opencode = req.headers.get("x-opencode-session");
+    return Response.json({ ok: true }, { status: 200 });
+  });
+
+  const config = singleBackendConfig({
+    id: "opencode-1",
+    baseUrl: `http://127.0.0.1:${backend.port}/v1`,
+  });
+  const manager = new BackendManager(config);
+  const result = await forwardWithRetry(
+    chatRequest(backend.port),
+    { model: "gpt-4o", messages: [] },
+    undefined,
+    manager,
+    config,
+  );
+
+  assert.strictEqual(result.response.status, 200);
+  assert.strictEqual(seen.session, null);
+  assert.strictEqual(seen.opencode, null);
 
   manager.stop();
   await backend.close();

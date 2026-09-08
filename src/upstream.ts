@@ -1,5 +1,6 @@
 import type { Config } from "./types.ts";
 import { BackendManager, withPath } from "./backend.ts";
+import { upstreamSessionValue } from "./session.ts";
 
 const HOP_BY_HOP = [
   "connection",
@@ -26,6 +27,45 @@ const DEFAULT_RETRY_CODES = [429, 529];
 const RATE_LIMIT_RE =
   /rate\s*limit|rate_limit|insufficient_quota|limit\s*reached|reached.{0,12}limit|too many requests|overloaded|quota/i;
 
+/**
+ * Whether the `x-opencode-session` header should be sent to this backend.
+ * URL-only: sent when the backend baseUrl's hostname is opencode.ai
+ * (including subdomains, e.g. the /zen/ gateways).
+ */
+export function shouldSendOpencodeSession(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    return host === "opencode.ai" || host.endsWith(".opencode.ai");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Compute the conversation-ID headers to send upstream. Derived from the
+ * router's internal session key so header-less clients (e.g. Copilot CLI,
+ * fingerprinted as `f:…`) still get sticky caching upstream — and pass
+ * OpenCode Go's `x-opencode-session` enforcement. Client-provided values
+ * are preserved; only missing headers are filled in. Header-only on
+ * purpose: no request-body mutation.
+ */
+export async function upstreamSessionHeaders(
+  baseUrl: string,
+  sessionKey: string | undefined,
+  headers: Headers,
+): Promise<void> {
+  const sessionValue = await upstreamSessionValue(sessionKey);
+  if (!sessionValue) return;
+  if (!headers.has("x-session-id")) {
+    headers.set("x-session-id", sessionValue);
+  }
+  if (
+    !headers.has("x-opencode-session") && shouldSendOpencodeSession(baseUrl)
+  ) {
+    headers.set("x-opencode-session", sessionValue);
+  }
+}
+
 export async function forwardWithRetry(
   req: Request,
   body: unknown,
@@ -44,7 +84,7 @@ export async function forwardWithRetry(
     tried.add(state.config.id);
     let response: Response;
     try {
-      response = await forwardOnce(req, body, state.config, config);
+      response = await forwardOnce(req, body, state.config, config, sessionKey);
     } catch (err) {
       console.warn(
         `[aiproxy] backend ${state.config.id} failed: ${
@@ -121,6 +161,7 @@ async function forwardOnce(
   body: unknown,
   backend: Config["backends"][number],
   config: Config,
+  sessionKey: string | undefined,
 ): Promise<Response> {
   const url = new URL(req.url);
   const pathname = url.pathname;
@@ -148,6 +189,11 @@ async function forwardOnce(
   if (backend.apiKey) {
     headers.set("authorization", `Bearer ${backend.apiKey}`);
   }
+
+  // Conversation-ID headers for upstream prompt-cache affinity (see
+  // upstreamSessionHeaders). Injected here so every forward — including
+  // retries/failovers — carries them.
+  await upstreamSessionHeaders(backend.baseUrl, sessionKey, headers);
 
   // Optional model rewrite: per-backend override wins, then global map.
   if (body && typeof body === "object" && !Array.isArray(body)) {

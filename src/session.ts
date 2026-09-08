@@ -46,6 +46,26 @@ export async function sessionKeyFromBody(
   return undefined;
 }
 
+/**
+ * Normalize an internal session key (`h:…` / `b:…` / `f:…`) into a value
+ * safe to send upstream as a conversation-ID header.
+ *
+ * Strips the internal single-char prefix, trims whitespace, passes values
+ * through unchanged when they fit OpenRouter's 256-char limit, and falls
+ * back to a deterministic SHA-256 hex digest when overlong. Returns
+ * undefined when there is no usable value (no session key).
+ */
+export async function upstreamSessionValue(
+  sessionKey: string | undefined,
+): Promise<string | undefined> {
+  if (!sessionKey) return undefined;
+  const prefixed = /^[hbf]:(.*)$/.exec(sessionKey);
+  const value = (prefixed ? prefixed[1] : sessionKey).trim();
+  if (!value) return undefined;
+  if (value.length <= 256) return value;
+  return await sha256hex(value);
+}
+
 async function sha256hex(input: string): Promise<string> {
   const data = new TextEncoder().encode(input);
   const digest = await crypto.subtle.digest("SHA-256", data);
