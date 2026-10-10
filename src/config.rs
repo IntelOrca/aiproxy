@@ -226,7 +226,7 @@ fn js_number_from_string(s: &str) -> Option<f64> {
 }
 
 /// TS `String()` for JSON values.
-fn js_to_string(value: &Value) -> String {
+pub fn js_to_string(value: &Value) -> String {
     match value {
         Value::Null => "null".to_string(),
         Value::Bool(b) => b.to_string(),

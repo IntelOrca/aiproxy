@@ -25,6 +25,8 @@ clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"
+# json helpers are only used by tests; the shipped binary stays lean.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [profile.release]
 opt-level = 2
