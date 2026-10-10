@@ -4,6 +4,5 @@ config.json
 # Logs
 *.log
 
-# Deno cache / runtime
-.deno/
-deno.lock
+# Rust build output
+/target

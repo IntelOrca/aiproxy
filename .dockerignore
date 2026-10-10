@@ -1,11 +1,13 @@
 # VCS / tooling
 .git
 .github
-.deno
 
 # Local secrets and logs — never bake a real config into the image
 config.json
 *.log
+
+# Rust build output
+target
 
 # Editor / OS noise
 .DS_Store

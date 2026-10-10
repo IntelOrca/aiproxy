@@ -1,0 +1,28 @@
+[package]
+name = "aiproxy"
+version = "0.1.0"
+edition = "2021"
+description = "Local, OpenAI-compatible completions router and load balancer"
+license = "MIT"
+
+[[bin]]
+name = "aiproxy"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs"] }
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+regex = "1"
+rand = "0.8"
+url = "2"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 2
