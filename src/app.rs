@@ -152,17 +152,53 @@ pub struct AppState {
     pub shutting_down: Arc<AtomicBool>,
 }
 
-/// A running router.
+/// A running HTTP server: either the router or a sandbox backend.
 pub struct Running {
     addr: SocketAddr,
     server: tokio::task::JoinHandle<()>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
-    state: Arc<AppState>,
+    shutting_down: Arc<AtomicBool>,
+    on_stop: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Running {
-    /// The address the router is listening on.
+    /// A bare server with no background tasks or shutdown hooks.
+    pub fn new(
+        addr: SocketAddr,
+        server: tokio::task::JoinHandle<()>,
+        shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    ) -> Self {
+        Self {
+            addr,
+            server,
+            shutdown_tx: Some(shutdown_tx),
+            tasks: Vec::new(),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            on_stop: None,
+        }
+    }
+
+    /// Track a background task that must be aborted on shutdown.
+    pub fn with_task(mut self, task: tokio::task::JoinHandle<()>) -> Self {
+        self.tasks.push(task);
+        self
+    }
+
+    /// Share the router's "shutting down" flag, so `begin_shutdown` makes
+    /// in-flight handlers answer 503.
+    pub fn with_shutdown_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.shutting_down = flag;
+        self
+    }
+
+    /// Register state to flush once the drain finishes.
+    pub fn on_stop(mut self, hook: impl FnOnce() + Send + 'static) -> Self {
+        self.on_stop = Some(Box::new(hook));
+        self
+    }
+
+    /// The address the server is listening on.
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
@@ -170,11 +206,11 @@ impl Running {
     /// Enter shutdown: new requests are answered with 503 from here on.
     /// Returns false when a shutdown was already in progress.
     pub fn begin_shutdown(&self) -> bool {
-        !self.state.shutting_down.swap(true, Ordering::SeqCst)
+        !self.shutting_down.swap(true, Ordering::SeqCst)
     }
 
     /// Stop accepting connections, drain in-flight requests (bounded by
-    /// `grace`), then flush persisted state.
+    /// `grace`), abort background tasks and flush persisted state.
     pub async fn stop(mut self, grace: Duration) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
@@ -183,8 +219,9 @@ impl Running {
         for task in self.tasks {
             task.abort();
         }
-        self.state.manager.flush();
-        self.state.stats.flush();
+        if let Some(hook) = self.on_stop.take() {
+            hook();
+        }
     }
 
     /// Stop immediately without draining.
@@ -207,18 +244,19 @@ pub async fn start_aiproxy(config: Config) -> std::io::Result<Running> {
     let client = reqwest::Client::builder()
         .build()
         .map_err(|err| std::io::Error::other(err.to_string()))?;
+    let shutting_down = Arc::new(AtomicBool::new(false));
     let state = Arc::new(AppState {
-        manager,
+        manager: Arc::clone(&manager),
         config,
         client,
-        stats,
-        shutting_down: Arc::new(AtomicBool::new(false)),
+        stats: Arc::clone(&stats),
+        shutting_down: Arc::clone(&shutting_down),
     });
 
     // Periodic health checks and debounced persistence of pins and stats.
-    let health_checks = BackendManager::start_health_checks(&state.manager, state.client.clone());
-    let pin_persistence = state.manager.start_persistence();
-    let stats_persistence = state.stats.start_persistence();
+    let health_checks = BackendManager::start_health_checks(&manager, state.client.clone());
+    let pin_persistence = manager.start_persistence();
+    let stats_persistence = stats.start_persistence();
 
     let app: Router = Router::new()
         .fallback(handle_request)
@@ -232,13 +270,16 @@ pub async fn start_aiproxy(config: Config) -> std::io::Result<Running> {
         server.await.ok();
     });
 
-    Ok(Running {
-        addr,
-        server,
-        shutdown_tx: Some(shutdown_tx),
-        tasks: vec![health_checks, pin_persistence, stats_persistence],
-        state,
-    })
+    let flush = move || {
+        manager.flush();
+        stats.flush();
+    };
+    Ok(Running::new(addr, server, shutdown_tx)
+        .with_task(health_checks)
+        .with_task(pin_persistence)
+        .with_task(stats_persistence)
+        .with_shutdown_flag(shutting_down)
+        .on_stop(flush))
 }
 
 /// Start the router and run until SIGINT/SIGTERM, then drain and flush.
@@ -272,7 +313,7 @@ pub async fn run_until_shutdown(config: Config) -> ! {
 }
 
 /// Wait for the first SIGINT or SIGTERM.
-async fn first_shutdown_signal() {
+pub async fn first_shutdown_signal() {
     #[cfg(unix)]
     {
         let mut terminate =
