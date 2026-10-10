@@ -32,13 +32,13 @@ struct Args {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-
     if args.sandbox_server {
         run_standalone().await;
         return;
     }
 
     if args.sandbox {
+        // The sandbox runs its own router to completion.
         run_sandbox().await;
     }
 

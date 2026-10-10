@@ -551,6 +551,36 @@ async fn rate_limited_backend_fails_over_and_records_the_serving_backend() {
     assert_eq!(backends[0]["healthy"], true);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_healthy_backends_returns_a_502_and_records_nothing() {
+    // Port 1 has nothing listening, so the only backend is down.
+    let cluster = cluster(1, |config| {
+        config.backends[0] = BackendConfig::new("dead", "http://127.0.0.1:1/v1");
+    })
+    .await;
+
+    let response = cluster
+        .post_json(
+            "/v1/chat/completions",
+            &json!({"model": "sandbox-gpt-4o", "messages": []}),
+            &[],
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body: Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(body["error"]["message"], "no healthy backends available");
+    assert_eq!(body["error"]["type"], "server_error");
+    assert_eq!(body["error"]["code"], 502);
+
+    // Nothing was routed, so nothing is recorded.
+    let status = status_json(&cluster).await;
+    assert_eq!(status["backends"][0]["requests"], 0);
+    assert!(status["recent"].as_array().expect("recent").is_empty());
+}
+
 // --- errors and auth ----------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

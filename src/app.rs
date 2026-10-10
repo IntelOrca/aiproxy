@@ -386,7 +386,7 @@ async fn handle_request(
     )
     .await;
 
-    let mut outcome = match result {
+    let outcome = match result {
         Ok(outcome) => outcome,
         Err(err) => {
             error(err.to_string());
@@ -394,40 +394,34 @@ async fn handle_request(
         }
     };
 
-    // Record and log the routed request.
-    if let Some(backend_id) = outcome.backend_id.take() {
-        let ms = t0.elapsed().as_millis() as u64;
-        state.stats.record(
-            RoutingEntry {
-                at: to_iso8601(now_ms()),
-                session_id: outcome
-                    .session_key
-                    .clone()
-                    .unwrap_or_else(|| "-".to_string()),
-                model: outcome.model.clone(),
-                backend_id,
-                endpoint: outcome.endpoint.clone().unwrap_or_default(),
-                status: outcome.status,
-                ms,
-            },
-            max_recent(&state.config),
-        );
-        info(format!(
-            "{} {} session={} -> {}{} model={} status={} {}ms",
-            method,
-            path,
-            outcome.session_key.as_deref().unwrap_or("-"),
-            outcome.backend_id.as_deref().unwrap_or_default(),
-            outcome
-                .endpoint
-                .as_ref()
-                .map(|e| format!(" ({e})"))
-                .unwrap_or_default(),
-            outcome.model,
-            outcome.status,
-            ms,
-        ));
+    let ms = t0.elapsed().as_millis() as u64;
+
+    // Record the routed request, but only when a backend actually served it.
+    let entry = RoutingEntry {
+        at: to_iso8601(now_ms()),
+        session_id: outcome
+            .session_key
+            .clone()
+            .unwrap_or_else(|| "-".to_string()),
+        model: outcome.model.clone(),
+        // No backend available renders as "none", like the Deno router.
+        backend_id: outcome
+            .backend_id
+            .clone()
+            .unwrap_or_else(|| "none".to_string()),
+        endpoint: outcome.endpoint.clone().unwrap_or_default(),
+        status: outcome.status,
+        ms,
+    };
+    if outcome.backend_id.is_some() {
+        state.stats.record(entry.clone(), max_recent(&state.config));
     }
+    info(route_log_line(
+        &method,
+        &path,
+        &entry,
+        outcome.session_key.as_deref(),
+    ));
 
     let mut builder = Response::builder().status(outcome.status);
     if let Some(headers) = builder.headers_mut() {
@@ -441,6 +435,32 @@ async fn handle_request(
             "invalid_request_error",
         ),
     }
+}
+
+/// The per-request log line, e.g.
+/// `POST /v1/chat/completions session=f:abc -> b (http://127.0.0.1:1/v1) model=gpt-4o status=200 12ms`.
+fn route_log_line(
+    method: &Method,
+    path: &str,
+    entry: &RoutingEntry,
+    session_key: Option<&str>,
+) -> String {
+    let endpoint = if entry.endpoint.is_empty() || entry.backend_id == "none" {
+        String::new()
+    } else {
+        format!(" ({})", entry.endpoint)
+    };
+    format!(
+        "{} {} session={} -> {}{} model={} status={} {}ms",
+        method,
+        path,
+        session_key.unwrap_or("-"),
+        entry.backend_id,
+        endpoint,
+        entry.model,
+        entry.status,
+        entry.ms,
+    )
 }
 
 /// A handled request: the response plus the metadata the dashboard records.
@@ -960,6 +980,52 @@ mod tests {
         assert_eq!(value["error"]["message"], "invalid or missing API key");
         assert_eq!(value["error"]["type"], "invalid_request_error");
         assert_eq!(value["error"]["code"], 401);
+    }
+
+    #[test]
+    fn route_log_line_matches_the_deno_format() {
+        let entry = RoutingEntry {
+            at: "2026-01-01T00:00:00.000Z".to_string(),
+            session_id: "f:abc".to_string(),
+            model: "gpt-4o".to_string(),
+            backend_id: "b".to_string(),
+            endpoint: "http://127.0.0.1:1/v1".to_string(),
+            status: 200,
+            ms: 12,
+        };
+        assert_eq!(
+            route_log_line(
+                &Method::POST,
+                "/v1/chat/completions",
+                &entry,
+                Some("f:abc")
+            ),
+            "POST /v1/chat/completions session=f:abc -> b (http://127.0.0.1:1/v1) model=gpt-4o status=200 12ms"
+        );
+        // No session key and no endpoint render as "-" and no suffix.
+        assert_eq!(
+            route_log_line(&Method::GET, "/v1/models", &entry, None)
+                .split(" -> ")
+                .next()
+                .expect("prefix"),
+            "GET /v1/models session=-"
+        );
+        // A request no backend could serve logs "none" with no endpoint.
+        let unserved = RoutingEntry {
+            backend_id: "none".to_string(),
+            endpoint: String::new(),
+            status: 502,
+            ..entry
+        };
+        assert_eq!(
+            route_log_line(
+                &Method::POST,
+                "/v1/chat/completions",
+                &unserved,
+                Some("f:abc")
+            ),
+            "POST /v1/chat/completions session=f:abc -> none model=gpt-4o status=502 12ms"
+        );
     }
 
     #[test]

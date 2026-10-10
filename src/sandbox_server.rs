@@ -95,9 +95,15 @@ pub async fn run_standalone() {
 
 /// Bind `app` to `127.0.0.1:<port>` and serve until shutdown.
 async fn start_backend_on(app: Router, port: u16) -> Running {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-        .await
-        .expect("bind sandbox backend");
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            crate::log::error(format!(
+                "could not listen on 127.0.0.1:{port} for a sandbox backend: {err}"
+            ));
+            std::process::exit(1);
+        }
+    };
     let addr = listener.local_addr().expect("local addr");
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {
