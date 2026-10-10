@@ -2,11 +2,14 @@
 setlocal
 cd /d "%~dp0"
 
-set "PORT="
 set "CONFIG="
+set "PORT="
 set "SANDBOX="
 set "CONFIG_ARG="
 set "PORT_ARG="
+
+rem Use the compiled binary when present, otherwise build on the fly.
+set "BIN=target\release\aiproxy.exe"
 
 :parse
 if "%~1"=="" goto :run
@@ -16,6 +19,7 @@ if /i "%~1"=="--sandbox"   ( set "SANDBOX=1"  & shift & goto :parse )
 if /i "%~1"=="--config"    ( set "CONFIG=%~2" & shift & shift & goto :parse )
 if /i "%~1"=="-h"          ( goto :help )
 if /i "%~1"=="--help"      ( goto :help )
+if /i "%~1"=="--version"   ( goto :version )
 echo Unknown argument: %~1
 echo Run aiproxy.bat --help for usage.
 exit /b 1
@@ -26,13 +30,21 @@ if defined SANDBOX goto :sandbox
 if defined CONFIG set "CONFIG_ARG=--config %CONFIG%"
 if defined PORT   set "PORT_ARG=--port %PORT%"
 echo [aiproxy] router%CONFIG_ARG%%PORT_ARG%
-deno run --allow-net --allow-read --allow-write --allow-env main.ts %CONFIG_ARG% %PORT_ARG%
+if exist "%BIN%" (
+  "%BIN%" %CONFIG_ARG% %PORT_ARG%
+) else (
+  cargo run --release --quiet -- %CONFIG_ARG% %PORT_ARG%
+)
 goto :eof
 
 :sandbox
 if not defined PORT set "PORT=6060"
 echo [aiproxy] sandbox cluster: router on %PORT%, fake backends on %PORT%+1,+2,+3
-deno run --allow-net --allow-write --allow-env src\sandbox.ts
+if exist "%BIN%" (
+  set "PORT=%PORT%" && "%BIN%" --sandbox
+) else (
+  set "PORT=%PORT%" && cargo run --release --quiet -- --sandbox
+)
 goto :eof
 
 :help
@@ -48,4 +60,12 @@ echo Examples:
 echo   aiproxy.bat --sandbox -p 6060            Router on 6060 + fake backends on 6061..6063
 echo   aiproxy.bat                               Router with config.json
 echo   aiproxy.bat --config config.alt.json      Router with another config
+exit /b 0
+
+:version
+if exist "%BIN%" (
+  "%BIN%" --version
+) else (
+  cargo run --release --quiet -- --version
+)
 exit /b 0

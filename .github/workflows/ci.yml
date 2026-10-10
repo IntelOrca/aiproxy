@@ -13,21 +13,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: denoland/setup-deno@v2
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          deno-version: 2.x
+          components: rustfmt, clippy
 
       - name: Format check
-        run: deno fmt --check
+        run: cargo fmt --check
 
       - name: Lint
-        run: deno lint
-
-      - name: Type-check
-        run: deno check main.ts
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
-        run: deno test --allow-net --allow-read --allow-env
+        run: cargo test --locked
 
   docker:
     name: Docker image build

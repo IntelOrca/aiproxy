@@ -4,9 +4,9 @@
 [![CI](https://github.com/IntelOrca/aiproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/IntelOrca/aiproxy/actions/workflows/ci.yml)
 
 aiproxy is a local, OpenAI-compatible completions router and load balancer
-written in Deno and TypeScript. AI clients such as GitHub Copilot CLI point at
-its base URL, and it forwards each request to one of several backends (for
-example multiple opencode instances).
+written in Rust. AI clients such as GitHub Copilot CLI point at its base URL,
+and it forwards each request to one of several backends (for example multiple
+opencode instances).
 
 Each conversation is pinned to one backend for its lifetime. Provider prompt
 caching is content-addressed per account, so keeping a conversation on a single
@@ -33,7 +33,8 @@ tokens instead of the full prefix every time.
 
 ## Running
 
-You need Deno 2 or later, or Docker (see below).
+You need a recent stable Rust toolchain (developed and tested against 1.98), or
+Docker (see below).
 
 ### From source
 
@@ -46,18 +47,18 @@ cp config.example.json config.json
 Then start the router:
 
 - Windows: `aiproxy.bat`
-- Linux/macOS: `deno task start`
+- Linux/macOS: `./aiproxy.sh`
 
 The router accepts `--config <path>` to select a config file (default
-`config.json`) and `--port <port>` to override the configured port. It needs
-`--allow-net --allow-read --allow-write` (write is for persisting session pins);
-`aiproxy.bat` and `deno task start` already grant these.
+`config.json`) and `--port <port>` to override the configured port. The
+launchers build a release binary on first run and reuse `target/release/aiproxy`
+afterwards; you can also run `cargo run --release --` directly.
 
 ### With Docker
 
-The multi-stage Dockerfile compiles the router with `deno compile` into a single
-standalone binary and runs it on a minimal scratch image as a non-root user,
-exposing port 8080.
+The multi-stage Dockerfile compiles a statically linked Rust binary (rustls
+means no OpenSSL dependency) and runs it on a minimal scratch image as a
+non-root user, exposing port 8080.
 
 ```bash
 docker build -t aiproxy .
@@ -75,7 +76,7 @@ No real backends needed: the sandbox starts a router plus three fake backends so
 you can watch load balancing, sticky sessions, and the dashboard.
 
 ```bash
-aiproxy.bat --sandbox -p 6060
+./aiproxy.sh --sandbox -p 6060      # or: aiproxy.bat --sandbox -p 6060
 ```
 
 The router listens on 6060 and the fake backends on 6061, 6062, and 6063. Open
@@ -129,6 +130,10 @@ When `apiKeys` is set, clients must authenticate to the router with one of the
 listed keys or receive a 401. The client's key is not forwarded upstream; use
 the per-backend `apiKey` if a backend needs its own.
 
+Unknown or invalid values in the config fall back to the defaults above, so a
+partial or malformed config still starts the router. As in previous versions, a
+numeric setting of `0` (or a non-numeric value) also falls back to its default.
+
 ### Persisted state
 
 Session to backend pins, backend request counts, and the recent routes log are
@@ -138,9 +143,7 @@ dashboard. State lives in `%LOCALAPPDATA%\aiproxy\` on Windows and
 it with `stateDir` in the config. On startup, pins are restored when their
 backend still exists in the config and the pin is newer than `sessionTtlMs`;
 expired or orphaned pins are dropped, as are recent routes from backends no
-longer configured. The router needs `--allow-write` for this, which
-`aiproxy.bat` and `deno task start` already grant. Writes are debounced and
-atomic (temp file plus rename).
+longer configured. Writes are debounced and atomic (temp file plus rename).
 
 `recentRoutes` (default 200) caps both the dashboard's recent routes table and
 the persisted stats.
@@ -156,14 +159,15 @@ the persisted stats.
 ## Tests
 
 ```bash
-deno task check  # type-check
-deno task lint   # lint
-deno task fmt    # format check
-deno task test   # unit tests
+cargo test          # unit and integration tests
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 ```
 
-All four run in CI on every push and pull request; the workflow also builds the
-Docker image.
+All three run in CI on every push and pull request; the workflow also builds the
+Docker image. Unit tests live beside the modules they cover (mirroring the old
+`*_test.ts` colocated tests) and `tests/e2e.rs` boots the real router against
+fake backends.
 
 ## License
 

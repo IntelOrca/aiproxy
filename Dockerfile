@@ -1,27 +1,29 @@
 # ---- Build stage ------------------------------------------------------------
-# Compile aiproxy into a single self-contained binary.
-FROM denoland/deno:alpine-2.9.5 AS build
+# Compile a statically linked Rust binary. rustls keeps the binary free of
+# OpenSSL, so the runtime stage needs no shared libraries.
+FROM rust:alpine AS build
+
+RUN apk add --no-cache musl-dev
 
 WORKDIR /app
 
-# All imports are local, so copying the sources is enough.
+# Fetch dependencies first so they can be cached across source changes.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
+    && cargo fetch --locked
+
 COPY . .
 
-# Type-check before shipping.
-RUN deno task check
+# Format, lint and test before shipping.
+RUN cargo fmt --check \
+    && cargo clippy --all-targets -- -D warnings \
+    && cargo test --locked
 
-# Compile the router into a standalone binary with its runtime
-# permissions baked in.
-RUN deno compile \
-      --allow-net \
-      --allow-read \
-      --allow-env \
-      --output aiproxy \
-      main.ts
+RUN cargo build --release --locked --target x86_64-unknown-linux-musl
 
 # ---- Runtime stage ----------------------------------------------------------
-# The compiled binary is self-contained (Deno bundles the root CA store), so a
-# bare scratch image keeps the container as small as possible.
+# The binary is static, so a bare scratch image keeps the container as small
+# as possible.
 FROM scratch
 
 # Run as non-root (numeric uid works without an /etc/passwd in scratch).
@@ -30,7 +32,7 @@ USER 65532:65532
 # The router reads config.json from the working directory; provide the example
 # config as a sensible default. Mount your own config with:
 #   docker run -v "$PWD/config.json:/config.json" ...
-COPY --from=build /app/aiproxy /aiproxy
+COPY --from=build /app/target/x86_64-unknown-linux-musl/release/aiproxy /aiproxy
 COPY --from=build /app/config.example.json /config.json
 
 EXPOSE 8080
