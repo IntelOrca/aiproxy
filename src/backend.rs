@@ -248,10 +248,12 @@ impl BackendManager {
     /// With `sticky` enabled and a session key, returns the backend this
     /// conversation was pinned to (if still healthy and not excluded). If the
     /// pinned backend is healthy but excluded (rate-limit failover in
-    /// progress), picks another backend WITHOUT re-pinning, so the
+    /// progress), picks another backend WITHOUT touching the pin, so the
     /// conversation keeps its preferred backend for next time. If the pinned
-    /// backend is unhealthy, the pin is dropped and a fresh backend is picked
-    /// (and pinned).
+    /// backend is unhealthy, the pin is dropped and a fresh backend is picked.
+    /// The pick itself never pins: upstream pins the session once a request
+    /// actually succeeds, so failed responses cannot strand a session on a
+    /// backend that cannot serve it.
     ///
     /// New picks prefer the lowest `priority` group of healthy backends and do
     /// a weighted random pick within it.
@@ -293,8 +295,8 @@ impl BackendManager {
                     .any(|s| s.config.id == pinned_id && s.healthy)
                 {
                     // Excluded for this request (e.g. rate-limited) — use
-                    // another backend without touching the pin. upstream
-                    // re-pins the session to whichever backend serves it.
+                    // another backend without touching the pin. upstream pins
+                    // the session to whichever backend serves a request.
                     (Selection::Failover, false)
                 } else {
                     // Pinned backend is down — drop the pin and pick fresh.
@@ -303,7 +305,7 @@ impl BackendManager {
                 }
             }
             // No pin for this session yet (or sticky routing is off).
-            _ => (Selection::Pin, self.config.sticky && session_key.is_some()),
+            _ => (Selection::Pin, false),
         };
 
         let chosen = match selection {
@@ -313,22 +315,7 @@ impl BackendManager {
                 // the conversation returns to its preferred backend next turn.
                 Some(weighted_pick(&pool))
             }
-            Selection::Pin => {
-                let chosen = weighted_pick(&pool);
-                if self.config.sticky {
-                    if let Some(key) = session_key {
-                        inner.pins.insert(
-                            key.to_string(),
-                            StoredPin {
-                                backend_id: chosen.id.clone(),
-                                last_seen: now_ms(),
-                            },
-                        );
-                        evict_pins(&mut inner, self.config.session_ttl_ms);
-                    }
-                }
-                Some(chosen)
-            }
+            Selection::Pin => Some(weighted_pick(&pool)),
         };
 
         drop(inner);
@@ -338,7 +325,8 @@ impl BackendManager {
         chosen
     }
 
-    /// Re-pin a session to a specific backend (e.g. after a retry/failover).
+    /// Re-pin a session to a specific backend (upstream calls this once a
+    /// request has actually been served successfully).
     pub fn pin_to(&self, session_key: &str, backend_id: &str) {
         if !self.config.sticky {
             return;
@@ -352,8 +340,18 @@ impl BackendManager {
                     last_seen: now_ms(),
                 },
             );
+            let config_ttl = self.config.session_ttl_ms;
+            evict_pins(&mut inner, config_ttl);
         }
         self.persist_soon();
+    }
+
+    /// Whether a backend is currently marked healthy.
+    pub fn is_healthy(&self, backend_id: &str) -> bool {
+        self.lock()
+            .states
+            .iter()
+            .any(|s| s.config.id == backend_id && s.healthy)
     }
 
     /// Mark a backend unhealthy after a failed forward.
@@ -459,6 +457,7 @@ mod tests {
                 model: None,
                 api_key: None,
                 priority: if *priority < 0 { None } else { Some(*priority) },
+                retries: 0,
             })
             .collect()
     }
@@ -471,7 +470,10 @@ mod tests {
     fn sticky_same_session_key_always_lands_on_same_backend() {
         let (config, _dir) = test_config(backends(&[("a", -1), ("b", -1), ("c", -1)]), true);
         let manager = BackendManager::new(config);
+        // The pick itself does not pin; upstream pins once a request succeeds.
         let b1 = manager.pick(Some("f:key"), &exclusion(&[])).expect("pick");
+        assert_eq!(manager.pin_backend_id("f:key"), None);
+        manager.pin_to("f:key", &b1.id);
         let b2 = manager.pick(Some("f:key"), &exclusion(&[])).expect("pick");
         let b3 = manager.pick(Some("f:key"), &exclusion(&[])).expect("pick");
         assert_eq!(b1.id, b2.id);
@@ -601,8 +603,7 @@ mod tests {
     fn excluded_pinned_session_fails_over_without_losing_the_pin() {
         let (config, _dir) = test_config(backends(&[("a", 0), ("b", 1)]), true);
         let manager = BackendManager::new(config);
-        let first = manager.pick(Some("f:s"), &exclusion(&[])).expect("pick");
-        assert_eq!(first.id, "a");
+        manager.pin_to("f:s", "a");
 
         // Simulate a rate-limit failover: a is excluded for this request only.
         let failover = manager.pick(Some("f:s"), &exclusion(&["a"])).expect("pick");
@@ -618,13 +619,14 @@ mod tests {
     fn downed_pinned_backend_drops_the_pin() {
         let (config, _dir) = test_config(backends(&[("a", 0), ("b", 1)]), true);
         let manager = BackendManager::new(config);
-        let first = manager.pick(Some("f:s"), &exclusion(&[])).expect("pick");
-        assert_eq!(first.id, "a");
+        manager.pin_to("f:s", "a");
 
         manager.mark_down("a");
         let failover = manager.pick(Some("f:s"), &exclusion(&[])).expect("pick");
         assert_eq!(failover.id, "b");
-        assert_eq!(manager.pin_backend_id("f:s").as_deref(), Some("b"));
+        // The stale pin is dropped; the session is only re-pinned once the
+        // fallback actually serves a request.
+        assert_eq!(manager.pin_backend_id("f:s"), None);
     }
 
     #[test]
@@ -662,9 +664,7 @@ mod tests {
         config.state_dir = Some(dir.path().display().to_string());
 
         let first = BackendManager::new(config.clone());
-        let chosen = first
-            .pick(Some("f:survive"), &exclusion(&[]))
-            .expect("pick");
+        first.pin_to("f:survive", "a");
         first.stop(); // flush to disk
 
         // Simulate a restart: a brand-new manager reading the same dir.
@@ -672,7 +672,7 @@ mod tests {
         let restored = second
             .pick(Some("f:survive"), &exclusion(&[]))
             .expect("pick");
-        assert_eq!(restored.id, chosen.id);
+        assert_eq!(restored.id, "a");
     }
 
     #[test]
@@ -682,7 +682,7 @@ mod tests {
         config.state_dir = Some(dir.path().display().to_string());
 
         let first = BackendManager::new(config.clone());
-        first.pick(Some("f:stale"), &exclusion(&[]));
+        first.pin_to("f:stale", "a");
         first.stop();
 
         // Rewrite the persisted pin with an ancient lastSeen.
@@ -739,7 +739,7 @@ mod tests {
             }
         }
         // A new pin triggers eviction.
-        manager.pick(Some("f:fresh"), &exclusion(&[]));
+        manager.pin_to("f:fresh", "a");
 
         let remaining = manager.pin_count();
         assert!(

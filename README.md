@@ -21,9 +21,13 @@ tokens instead of the full prefix every time.
 - Priority backends are always tried first while healthy.
 - Sticky sessions keep each conversation on the same backend.
 - Periodic health checks, with failed forwards marking a backend down.
-- Retry and failover on transport errors and on rate-limit responses (HTTP
-  429/529 or rate-limit wording in the error body). The conversation is
-  re-pinned to whichever backend actually served it.
+- Retry and failover. Each backend is retried on rate-limit responses (HTTP
+  429/529 or rate-limit wording in the error body), on 5xx responses and on
+  transport errors, waiting longer each time (5s doubling to a 60s cap,
+  `retries` per backend, default 5) before moving on to the next backend.
+  Funds, credit and quota failures skip the waits and fail over immediately;
+  the funds error is only returned to the client once no backend can serve the
+  request. The conversation is pinned to whichever backend actually succeeded.
 - Optional model name rewriting per backend or via a global map.
 - Optional client API key authentication.
 - SSE streaming passthrough for chat completions.
@@ -110,13 +114,14 @@ All settings live in `config.json`. `config.example.json` is the template and
 | ----------------------- | ------------ | ---------------------------------------------------------------------------- |
 | `host`                  | `127.0.0.1`  | Router listen host; `*` or `0.0.0.0` means every interface.                   |
 | `port`                  | `8080`       | Router listen port.                                                          |
-| `backends`              | required     | Array of backends, each `{id, baseUrl, weight, model?, apiKey?, priority?}`. |
+| `backends`              | required     | Array of backends, each `{id, baseUrl, weight, model?, apiKey?, priority?, retries?}`. |
 | `sticky`                | `true`       | Pin each conversation to one backend.                                        |
 | `healthCheckIntervalMs` | `10000`      | How often backends are health-checked.                                       |
 | `healthCheckTimeoutMs`  | `2500`       | Health check timeout.                                                        |
 | `sessionTtlMs`          | `1800000`    | How long a session pin is remembered (30 minutes).                           |
 | `upstreamTimeoutMs`     | `600000`     | Per-request upstream timeout.                                                |
-| `maxRetries`            | `1`          | Failover attempts to other backends per request.                             |
+| `maxRetries`            | `1`          | Extra backends to try after the first one fails.                             |
+| `retryBaseDelayMs`      | `5000`       | Wait before retrying the same backend; doubles each retry up to 60s.         |
 | `retryStatusCodes`      | `[429, 529]` | Upstream status codes treated as rate limited.                               |
 | `retryOnLimitMessage`   | `true`       | Also fail over on rate-limit wording in the error body.                      |
 | `models`                | proxied      | Static model list advertised by `GET /v1/models`.                            |
@@ -137,6 +142,9 @@ Backend fields:
   healthy.
 - `model`: optional model name substituted when forwarding to this backend.
 - `apiKey`: Authorization header sent to this backend.
+- `retries`: how many times to retry this backend before failing over,
+  waiting longer each time (default 5). Set 0 to fail over on the first
+  failure.
 
 If `models` is omitted, the router proxies the model list from a healthy backend
 instead. `modelMap` rewrites the model the client asked for into what the

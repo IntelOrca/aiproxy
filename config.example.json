@@ -28,6 +28,7 @@
   "sessionTtlMs": 1800000,
   "upstreamTimeoutMs": 600000,
   "maxRetries": 2,
+  "retryBaseDelayMs": 5000,
   "retryStatusCodes": [429, 529],
   "retryOnLimitMessage": true,
   "recentRoutes": 200,

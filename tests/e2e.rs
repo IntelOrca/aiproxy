@@ -155,6 +155,8 @@ async fn cluster(count: usize, customize: impl FnOnce(&mut Config)) -> Cluster {
         session_ttl_ms: 60_000,
         upstream_timeout_ms: 5_000,
         max_retries: 1,
+        // No waits between same-backend retries in tests.
+        retry_base_delay_ms: 0,
         models: Some(MODELS.iter().map(|m| m.to_string()).collect()),
         state_dir: Some(state_dir.path().display().to_string()),
         ..Config::default()
@@ -519,6 +521,7 @@ async fn rate_limited_backend_fails_over_and_records_the_serving_backend() {
         session_ttl_ms: 60_000,
         upstream_timeout_ms: 5_000,
         max_retries: 1,
+        retry_base_delay_ms: 0,
         state_dir: Some(state_dir.path().display().to_string()),
         ..Config::default()
     };
@@ -549,6 +552,122 @@ async fn rate_limited_backend_fails_over_and_records_the_serving_backend() {
     // The limited backend stays healthy (a rate limit is not "down").
     let backends = status["backends"].as_array().expect("backends");
     assert_eq!(backends[0]["healthy"], true);
+}
+
+/// A backend whose account is out of funds.
+fn funds_backend() -> Router {
+    Router::new()
+        .route(
+            "/v1/models",
+            get(|| async { axum::Json(json!({"object": "list", "data": []})) }),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    StatusCode::PAYMENT_REQUIRED,
+                    axum::Json(json!({"error": {"message": "Insufficient balance."}})),
+                )
+            }),
+        )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn funds_failure_fails_over_to_the_next_backend() {
+    let funds = spawn_test_server(funds_backend()).await;
+    let healthy = spawn_test_server(fake_backend(&MODELS, StatusCode::OK)).await;
+
+    let state_dir = tempfile::tempdir().expect("temp dir");
+    let config = Config {
+        port: 0,
+        backends: vec![
+            BackendConfig {
+                priority: Some(0),
+                ..BackendConfig::new("funds", format!("{}/v1", funds.base_url()))
+            },
+            BackendConfig {
+                priority: Some(1),
+                ..BackendConfig::new("healthy", format!("{}/v1", healthy.base_url()))
+            },
+        ],
+        sticky: true,
+        health_check_interval_ms: 600_000,
+        health_check_timeout_ms: 1_000,
+        session_ttl_ms: 60_000,
+        upstream_timeout_ms: 5_000,
+        max_retries: 1,
+        retry_base_delay_ms: 0,
+        state_dir: Some(state_dir.path().display().to_string()),
+        ..Config::default()
+    };
+    let running = start_aiproxy(config).await.expect("start router");
+    let base_url = format!("http://{}", running.addr());
+
+    let body =
+        json!({"model": "sandbox-gpt-4o", "messages": [{"role": "user", "content": "turn"}]});
+    let response = reqwest::Client::new()
+        .post(format!("{base_url}/v1/chat/completions"))
+        .json(&body)
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let status: Value = reqwest::Client::new()
+        .get(format!("{base_url}/api/status"))
+        .send()
+        .await
+        .expect("request")
+        .json()
+        .await
+        .expect("json");
+    let recent = status["recent"].as_array().expect("recent");
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0]["backendId"], "healthy");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_funds_error_is_reported_only_when_no_backend_can_serve() {
+    let funds_a = spawn_test_server(funds_backend()).await;
+    let funds_b = spawn_test_server(funds_backend()).await;
+
+    let state_dir = tempfile::tempdir().expect("temp dir");
+    let config = Config {
+        port: 0,
+        backends: vec![
+            BackendConfig {
+                priority: Some(0),
+                ..BackendConfig::new("funds-a", format!("{}/v1", funds_a.base_url()))
+            },
+            BackendConfig {
+                priority: Some(1),
+                ..BackendConfig::new("funds-b", format!("{}/v1", funds_b.base_url()))
+            },
+        ],
+        sticky: true,
+        health_check_interval_ms: 600_000,
+        health_check_timeout_ms: 1_000,
+        session_ttl_ms: 60_000,
+        upstream_timeout_ms: 5_000,
+        max_retries: 1,
+        retry_base_delay_ms: 0,
+        state_dir: Some(state_dir.path().display().to_string()),
+        ..Config::default()
+    };
+    let running = start_aiproxy(config).await.expect("start router");
+    let base_url = format!("http://{}", running.addr());
+
+    let body =
+        json!({"model": "sandbox-gpt-4o", "messages": [{"role": "user", "content": "turn"}]});
+    let response = reqwest::Client::new()
+        .post(format!("{base_url}/v1/chat/completions"))
+        .json(&body)
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["message"], "Insufficient balance.");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

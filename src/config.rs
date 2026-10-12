@@ -8,7 +8,7 @@
 
 use crate::bind::normalize_host;
 use crate::log::warn;
-use crate::types::{BackendConfig, Config, DEFAULT_HOST};
+use crate::types::{BackendConfig, Config, DEFAULT_BACKEND_RETRIES, DEFAULT_HOST};
 use serde_json::Value;
 use std::path::Path;
 
@@ -74,6 +74,7 @@ pub fn load_config(path: impl AsRef<Path>) -> Config {
         session_ttl_ms: number_or(get("sessionTtlMs"), 30.0 * 60_000.0) as u64,
         upstream_timeout_ms: number_or(get("upstreamTimeoutMs"), 600_000.0) as u64,
         max_retries: number_or(get("maxRetries"), 1.0) as u64,
+        retry_base_delay_ms: number_or(get("retryBaseDelayMs"), 5_000.0) as u64,
         models: match get("models") {
             Some(Value::Array(items)) => Some(items.iter().map(js_to_string).collect()),
             _ => None,
@@ -142,6 +143,10 @@ fn load_backends(raw: Option<&Value>) -> Vec<BackendConfig> {
                     _ => None,
                 },
                 priority: field("priority").and_then(js_to_number).map(|n| n as i64),
+                retries: match field("retries").and_then(js_to_number) {
+                    Some(n) if n >= 0.0 => n as u64,
+                    _ => DEFAULT_BACKEND_RETRIES,
+                },
             }
         })
         .collect()
@@ -450,6 +455,35 @@ mod tests {
         // Missing fields keep their defaults.
         assert_eq!(backends[3].id, "b4");
         assert_eq!(backends[3].priority, None);
+        assert_eq!(backends[3].retries, 5);
+    }
+
+    #[test]
+    fn backend_retries_default_to_five_and_honor_explicit_values() {
+        let dir = temp_dir();
+        let path = write_config(
+            &dir,
+            "retries.json",
+            r#"{"backends":[
+                {"id":"default"},
+                {"id":"none","retries":0},
+                {"id":"custom","retries":2},
+                {"id":"junk","retries":"x"}
+            ]}"#,
+        );
+        let config = load_config(&path);
+        let retries: Vec<u64> = config.backends.iter().map(|b| b.retries).collect();
+        assert_eq!(retries, vec![5, 0, 2, 5]);
+    }
+
+    #[test]
+    fn retry_base_delay_defaults_to_five_seconds() {
+        let dir = temp_dir();
+        let absent = write_config(&dir, "a.json", "{}");
+        assert_eq!(load_config(&absent).retry_base_delay_ms, 5_000);
+
+        let explicit = write_config(&dir, "b.json", r#"{"retryBaseDelayMs":250}"#);
+        assert_eq!(load_config(&explicit).retry_base_delay_ms, 250);
     }
 
     #[test]

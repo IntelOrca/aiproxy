@@ -38,10 +38,29 @@ pub struct ForwardOutcome {
     pub endpoint: Option<String>,
 }
 
-static RATE_LIMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)rate\s*limit|rate_limit|insufficient_quota|limit\s*reached|reached.{0,12}limit|too many requests|overloaded|quota")
+/// Rate-limit wordings that trigger same-backend retries. Funds/credit/quota
+/// wordings are deliberately *not* here: those fail over immediately (see
+/// [`FUNDS_RE`]).
+static LIMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)rate\s*limit|rate_limit|limit\s*reached|reached.{0,12}limit|too many requests|overloaded")
         .expect("rate limit regex")
 });
+
+/// Funds/credit/quota exhaustion — the account cannot serve this backend
+/// right now, so waiting will not help: fail over immediately.
+static FUNDS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)insufficient\s+quota|insufficient\s+(?:funds|balance|credits?)|credits?error|payment\s+required|out\s+of\s+credits|no\s+credits|billing|quota",
+    )
+    .expect("funds regex")
+});
+
+/// Delay before the nth (0-based) retry of the same backend: `base_ms`
+/// doubled each time, capped at 60s. A base of 0 disables the waits (tests).
+pub fn retry_delay_ms(base_ms: u64, retry: u64) -> u64 {
+    const MAX_MS: u64 = 60_000;
+    base_ms.saturating_mul(1u64 << retry.min(32)).min(MAX_MS)
+}
 
 /// Whether the `x-opencode-session` header should be sent to this backend.
 /// URL-only: sent when the backend baseUrl's hostname is opencode.ai
@@ -97,73 +116,136 @@ pub struct ForwardRequest<'a> {
     pub session_key: Option<&'a str>,
 }
 
-/// Forward the request to a backend, failing over to another one on transport
-/// errors and on rate-limit responses. The conversation is re-pinned to
-/// whichever backend actually served it.
+/// Forward the request to a backend.
+///
+/// Each backend gets its own retry budget (`retries`, default 5) with a growing
+/// wait between attempts (5s doubling to a 60s cap by default). Retries cover
+/// rate-limit verdicts, upstream 5xx responses and transport errors; funds,
+/// credit and quota failures fail over immediately instead of waiting.
+///
+/// When a backend's retries are exhausted the request moves on to the next
+/// backend (up to `maxRetries` extra backends). The session is pinned only to
+/// a backend that actually returned a success, so failed responses cannot
+/// strand a conversation on a backend that cannot serve it. If every backend
+/// fails, a funds failure is reported to the client when one was seen;
+/// otherwise the last rate-limit/server response is relayed, falling back to a
+/// 502 when nothing responded.
 pub async fn forward_with_retry(
     client: &reqwest::Client,
     request: ForwardRequest<'_>,
     manager: &BackendManager,
     config: &Config,
 ) -> ForwardOutcome {
-    let max_attempts = (config.max_retries + 1).max(1);
+    let max_backends = (config.max_retries + 1).max(1) as usize;
     let mut tried: HashSet<String> = HashSet::new();
     let retry_codes: HashSet<u16> = config.retry_codes().into_iter().collect();
     let scan_body = config.retry_on_limit_message;
     let session_key = request.session_key;
+    let mut funds_failure: Option<ForwardOutcome> = None;
+    let mut last_failure: Option<ForwardOutcome> = None;
 
-    for attempt in 0..max_attempts {
+    'backends: for _ in 0..max_backends {
         let Some(chosen) = manager.pick(session_key, &tried) else {
             break;
         };
         tried.insert(chosen.id.clone());
 
-        let response = match forward_once(client, &request, &chosen, config).await {
-            Ok(response) => response,
-            Err(err) => {
-                crate::log::warn(format!("backend {} failed: {}", chosen.id, err));
-                manager.mark_down(&chosen.id);
-                if attempt + 1 < max_attempts {
-                    if let Some(key) = session_key {
-                        // Re-pin the session to whichever backend we fail
-                        // over to next.
-                        if let Some(next) = manager.pick(Some(key), &tried) {
-                            manager.pin_to(key, &next.id);
+        let mut retry: u64 = 0;
+        loop {
+            let response = match forward_once(client, &request, &chosen, config).await {
+                Ok(response) => response,
+                Err(err) => {
+                    crate::log::warn(format!("backend {} failed: {}", chosen.id, err));
+                    if retry < chosen.retries {
+                        let delay = retry_delay_ms(config.retry_base_delay_ms, retry);
+                        crate::log::warn(format!(
+                            "retrying backend {} in {}ms ({}/{})",
+                            chosen.id,
+                            delay,
+                            retry + 1,
+                            chosen.retries
+                        ));
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        retry += 1;
+                        // The health checker may have confirmed the backend is
+                        // down while we waited — fail over instead of burning
+                        // the rest of the retry budget on a dead backend.
+                        if manager.is_healthy(&chosen.id) {
+                            continue;
                         }
                     }
+                    manager.mark_down(&chosen.id);
+                    continue 'backends;
                 }
-                continue;
-            }
-        };
+            };
 
-        // Only responses we could still fail over from are inspected, so a
-        // streamed success is never buffered.
-        let outcome = match rate_limit_verdict(
-            response,
-            &retry_codes,
-            scan_body,
-            attempt + 1 < max_attempts,
-        )
-        .await
-        {
-            Verdict::Limited => {
-                // "Limit reached": fail over to another backend for THIS
-                // request. Do not mark down — a rate limit isn't "down".
-                crate::log::warn(format!("backend {} limit reached; failing over", chosen.id));
-                continue;
+            match classify(response, &retry_codes, scan_body, &chosen).await {
+                Verdict::Forward(outcome) => {
+                    if (200..300).contains(&outcome.status) {
+                        if let Some(key) = session_key {
+                            manager.pin_to(key, &chosen.id);
+                        }
+                    }
+                    return outcome;
+                }
+                Verdict::Funds(outcome) => {
+                    // Out of funds: waiting will not help — try the next
+                    // backend, and report this only if every backend fails.
+                    crate::log::warn(format!(
+                        "backend {} reports insufficient funds ({}); failing over",
+                        chosen.id, outcome.status
+                    ));
+                    funds_failure = Some(outcome);
+                    continue 'backends;
+                }
+                Verdict::Limit(outcome) => {
+                    if retry < chosen.retries {
+                        let delay = retry_delay_ms(config.retry_base_delay_ms, retry);
+                        crate::log::warn(format!(
+                            "backend {} limit reached; retrying in {}ms ({}/{})",
+                            chosen.id,
+                            delay,
+                            retry + 1,
+                            chosen.retries
+                        ));
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        retry += 1;
+                        continue;
+                    }
+                    crate::log::warn(format!(
+                        "backend {} limit reached after {} retries; failing over",
+                        chosen.id, retry
+                    ));
+                    last_failure = Some(outcome);
+                    continue 'backends;
+                }
+                Verdict::ServerError(outcome) => {
+                    if retry < chosen.retries {
+                        let delay = retry_delay_ms(config.retry_base_delay_ms, retry);
+                        crate::log::warn(format!(
+                            "backend {} server error ({}); retrying in {}ms ({}/{})",
+                            chosen.id,
+                            outcome.status,
+                            delay,
+                            retry + 1,
+                            chosen.retries
+                        ));
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        retry += 1;
+                        continue;
+                    }
+                    crate::log::warn(format!(
+                        "backend {} server error ({}) after {} retries; failing over",
+                        chosen.id, outcome.status, retry
+                    ));
+                    last_failure = Some(outcome);
+                    continue 'backends;
+                }
             }
-            Verdict::Forward(response) => outcome_from_stream(response, chosen.clone()),
-            Verdict::ForwardBuffered {
-                status,
-                headers,
-                body,
-            } => outcome_from_buffered(status, headers, body, chosen.clone()),
-        };
+        }
+    }
 
-        // This request was served after a retry — pin the conversation to the
-        // backend that actually handled it, so the warm prompt cache there is
-        // reused next turn instead of bouncing back to the rate-limited one.
-        pin_after_retry(session_key, &chosen, attempt, manager);
+    if let Some(outcome) = funds_failure.or(last_failure) {
         return outcome;
     }
 
@@ -179,34 +261,16 @@ pub async fn forward_with_retry(
     }
 }
 
-/// This request was served after a retry — pin the conversation to the backend
-/// that actually handled it, so the warm prompt cache there is reused next turn
-/// instead of bouncing back to the rate-limited one.
-fn pin_after_retry(
-    session_key: Option<&str>,
-    chosen: &BackendConfig,
-    attempt: u64,
-    manager: &BackendManager,
-) {
-    if attempt > 0 {
-        if let Some(key) = session_key {
-            manager.pin_to(key, &chosen.id);
-        }
-    }
-}
-
-/// What to do with an upstream response when further failover is possible.
+/// The classification of an upstream response.
 enum Verdict {
-    /// Not rate limited — forward the response as a stream.
-    Forward(reqwest::Response),
-    /// Not rate limited, but the body was already buffered to inspect it.
-    ForwardBuffered {
-        status: http::StatusCode,
-        headers: HeaderMap,
-        body: bytes::Bytes,
-    },
-    /// Rate limited (or unreadable) — the response is consumed; fail over.
-    Limited,
+    /// Relay this response as-is: a success, or a non-retryable client error.
+    Forward(ForwardOutcome),
+    /// Rate limited — retry the same backend, then fail over.
+    Limit(ForwardOutcome),
+    /// Funds/credit/quota exhausted — fail over immediately without retrying.
+    Funds(ForwardOutcome),
+    /// Upstream server error (5xx) — retry the same backend, then fail over.
+    ServerError(ForwardOutcome),
 }
 
 /// Build the relay outcome from a streaming upstream response.
@@ -222,41 +286,40 @@ fn outcome_from_stream(response: reqwest::Response, chosen: BackendChoice) -> Fo
     }
 }
 
-/// Decide whether an upstream response indicates rate limiting / quota
-/// exhaustion. Error bodies are buffered for the scan; anything else keeps
-/// streaming.
-async fn rate_limit_verdict(
+/// Classify an upstream response. Successes keep streaming; error bodies are
+/// buffered so they can be inspected (and later relayed if nothing else
+/// serves the request).
+async fn classify(
     response: reqwest::Response,
     codes: &HashSet<u16>,
     scan_body: bool,
-    check: bool,
+    chosen: &BackendConfig,
 ) -> Verdict {
-    if !check {
-        return Verdict::Forward(response);
+    let status = response.status().as_u16();
+    if status < 400 {
+        return Verdict::Forward(outcome_from_stream(response, chosen.clone()));
     }
-    if codes.contains(&response.status().as_u16()) {
-        return Verdict::Limited;
+
+    let status_code = response.status();
+    let headers = filter_response_headers(response.headers());
+    let bytes = response.bytes().await.unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    let outcome = outcome_from_buffered(status_code, headers, bytes, chosen.clone());
+
+    // Funds/credit/quota failures are not worth waiting on. A 402 is always
+    // one; other statuses are decided by their wording.
+    if status == 402 || FUNDS_RE.is_match(&text) {
+        return Verdict::Funds(outcome);
     }
-    if !scan_body || response.status().as_u16() < 400 {
-        return Verdict::Forward(response);
+    if codes.contains(&status) || (scan_body && LIMIT_RE.is_match(&text)) {
+        return Verdict::Limit(outcome);
     }
-    let status = response.status();
-    let headers = response.headers().clone();
-    match response.bytes().await {
-        Ok(bytes) => {
-            if RATE_LIMIT_RE.is_match(&String::from_utf8_lossy(&bytes)) {
-                Verdict::Limited
-            } else {
-                Verdict::ForwardBuffered {
-                    status,
-                    headers,
-                    body: bytes,
-                }
-            }
-        }
-        // A body that cannot even be read is as good as a failure: fail over.
-        Err(_) => Verdict::Limited,
+    if (500..600).contains(&status) {
+        return Verdict::ServerError(outcome);
     }
+    // Everything else is a request-level error (bad model, malformed body):
+    // relay it as-is rather than retrying something that cannot heal.
+    Verdict::Forward(outcome)
 }
 
 /// Relay one response after its body has been buffered for inspection.
@@ -417,6 +480,8 @@ mod tests {
             model: None,
             api_key: None,
             priority: None,
+            // Tests stay fast and predictable; retry tests opt in per backend.
+            retries: 0,
         }
     }
 
@@ -445,6 +510,8 @@ mod tests {
             health_check_timeout_ms: 1_000,
             session_ttl_ms: 60_000,
             upstream_timeout_ms: 5_000,
+            // No waits between retries in tests.
+            retry_base_delay_ms: 0,
             state_dir: Some(dir.path().display().to_string()),
             ..Config::default()
         };
@@ -676,17 +743,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_rate_limit_errors_are_not_retried() {
-        let primary = testing::spawn_test_server(axum::Router::new().route(
-            "/v1/chat/completions",
-            post(|| async {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({"error": {"message": "boom"}})),
-                )
-            }),
-        ))
-        .await;
+    async fn server_errors_are_retried_on_the_same_backend_then_fail_over() {
+        let primary_hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let primary = {
+            let hits = primary_hits.clone();
+            testing::spawn_test_server(axum::Router::new().route(
+                "/v1/chat/completions",
+                post(move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(serde_json::json!({"error": {"message": "boom"}})),
+                        )
+                    }
+                }),
+            ))
+            .await
+        };
         let backup_hits = std::sync::Arc::new(AtomicUsize::new(0));
         let backup = {
             let hits = backup_hits.clone();
@@ -703,12 +778,247 @@ mod tests {
             .await
         };
 
+        let mut setup = setup(primary.port, backup.port);
+        // Two retries: three attempts on the primary before failing over.
+        setup.config.backends[0].retries = 2;
+        setup.manager = BackendManager::new(setup.config.clone());
+        let outcome = forward(&setup, &chat_body(), Some("f:x")).await;
+
+        assert_eq!(outcome.backend_id.as_deref(), Some("backup"));
+        assert_eq!(outcome.status, 200);
+        assert_eq!(primary_hits.load(Ordering::SeqCst), 3);
+        assert_eq!(backup_hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn client_errors_are_relayed_without_retrying() {
+        let primary_hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let primary = {
+            let hits = primary_hits.clone();
+            testing::spawn_test_server(axum::Router::new().route(
+                "/v1/chat/completions",
+                post(move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(
+                                serde_json::json!({"error": {"message": "model not found"}}),
+                            ),
+                        )
+                    }
+                }),
+            ))
+            .await
+        };
+        let backup_hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let backup = {
+            let hits = backup_hits.clone();
+            testing::spawn_test_server(axum::Router::new().route(
+                "/v1/chat/completions",
+                post(move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(serde_json::json!({"ok": true}))
+                    }
+                }),
+            ))
+            .await
+        };
+
+        let mut setup = setup(primary.port, backup.port);
+        setup.config.backends[0].retries = 3;
+        setup.manager = BackendManager::new(setup.config.clone());
+        let mut outcome = forward(&setup, &chat_body(), Some("f:x")).await;
+
+        assert_eq!(outcome.backend_id.as_deref(), Some("primary"));
+        assert_eq!(outcome.status, 400);
+        assert_eq!(primary_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
+        assert!(body_text(&mut outcome).await.contains("model not found"));
+    }
+
+    #[tokio::test]
+    async fn funds_failure_fails_over_immediately_without_retrying() {
+        let primary_hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let primary = {
+            let hits = primary_hits.clone();
+            testing::spawn_test_server(axum::Router::new().route(
+                "/v1/chat/completions",
+                post(move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (
+                            axum::http::StatusCode::PAYMENT_REQUIRED,
+                            axum::Json(serde_json::json!({
+                                "error": {"message": "Insufficient balance."}
+                            })),
+                        )
+                    }
+                }),
+            ))
+            .await
+        };
+        let backup = testing::spawn_test_server(axum::Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(serde_json::json!({"ok": true})) }),
+        ))
+        .await;
+
+        let mut setup = setup(primary.port, backup.port);
+        // Even with a big retry budget, funds failures must not be retried.
+        setup.config.backends[0].retries = 3;
+        setup.manager = BackendManager::new(setup.config.clone());
+        let outcome = forward(&setup, &chat_body(), Some("f:pay")).await;
+
+        assert_eq!(outcome.backend_id.as_deref(), Some("backup"));
+        assert_eq!(outcome.status, 200);
+        assert_eq!(primary_hits.load(Ordering::SeqCst), 1);
+        // The session follows the backend that actually served it.
+        assert_eq!(
+            setup.manager.pin_backend_id("f:pay").as_deref(),
+            Some("backup")
+        );
+    }
+
+    #[tokio::test]
+    async fn credits_error_on_a_401_is_treated_as_a_funds_failure() {
+        let primary_hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let primary = {
+            let hits = primary_hits.clone();
+            testing::spawn_test_server(axum::Router::new().route(
+                "/v1/chat/completions",
+                post(move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            axum::Json(serde_json::json!({
+                                "type": "CreditsError",
+                                "message": "Insufficient balance. Manage your billing here."
+                            })),
+                        )
+                    }
+                }),
+            ))
+            .await
+        };
+        let backup = testing::spawn_test_server(axum::Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { axum::Json(serde_json::json!({"ok": true})) }),
+        ))
+        .await;
+
+        let mut setup = setup(primary.port, backup.port);
+        setup.config.backends[0].retries = 3;
+        setup.manager = BackendManager::new(setup.config.clone());
+        let outcome = forward(&setup, &chat_body(), Some("f:pay")).await;
+
+        assert_eq!(outcome.backend_id.as_deref(), Some("backup"));
+        assert_eq!(outcome.status, 200);
+        assert_eq!(primary_hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn funds_failure_is_reported_when_every_backend_fails() {
+        fn funds_backend() -> axum::Router {
+            axum::Router::new().route(
+                "/v1/chat/completions",
+                post(|| async {
+                    (
+                        axum::http::StatusCode::PAYMENT_REQUIRED,
+                        axum::Json(serde_json::json!({
+                            "error": {"message": "Insufficient balance."}
+                        })),
+                    )
+                }),
+            )
+        }
+        let primary = testing::spawn_test_server(funds_backend()).await;
+        let backup = testing::spawn_test_server(funds_backend()).await;
+
+        let setup = setup(primary.port, backup.port);
+        let mut outcome = forward(&setup, &chat_body(), Some("f:pay")).await;
+
+        assert_eq!(outcome.backend_id.as_deref(), Some("backup"));
+        assert_eq!(outcome.status, 402);
+        assert!(body_text(&mut outcome)
+            .await
+            .contains("Insufficient balance"));
+    }
+
+    #[tokio::test]
+    async fn failed_responses_do_not_pin_the_session() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let server = testing::spawn_test_server(axum::Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    axum::http::StatusCode::PAYMENT_REQUIRED,
+                    axum::Json(serde_json::json!({"error": {"message": "Insufficient balance."}})),
+                )
+            }),
+        ))
+        .await;
+        let config = Config {
+            backends: vec![backend("only", server.port)],
+            sticky: true,
+            retry_base_delay_ms: 0,
+            state_dir: Some(dir.path().display().to_string()),
+            ..Config::default()
+        };
+        let manager = BackendManager::new(config.clone());
+
+        let outcome = forward_with_retry(
+            &reqwest::Client::new(),
+            ForwardRequest {
+                method: Method::POST,
+                path: "/v1/chat/completions",
+                query: None,
+                headers: &chat_headers(),
+                body: &chat_body(),
+                session_key: Some("f:pay"),
+            },
+            &manager,
+            &config,
+        )
+        .await;
+
+        assert_eq!(outcome.status, 402);
+        assert_eq!(
+            manager.pin_backend_id("f:pay"),
+            None,
+            "an error response must not pin the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_backends_limited_returns_the_limit_response() {
+        fn limited_backend() -> axum::Router {
+            axum::Router::new().route(
+                "/v1/chat/completions",
+                post(|| async {
+                    (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        axum::Json(serde_json::json!({"error": {"message": "rate limit"}})),
+                    )
+                }),
+            )
+        }
+        let primary = testing::spawn_test_server(limited_backend()).await;
+        let backup = testing::spawn_test_server(limited_backend()).await;
+
         let setup = setup(primary.port, backup.port);
         let mut outcome = forward(&setup, &chat_body(), Some("f:x")).await;
-        assert_eq!(outcome.backend_id.as_deref(), Some("primary"));
-        assert_eq!(outcome.status, 500);
-        assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
-        assert!(body_text(&mut outcome).await.contains("boom"));
+
+        // The last backend's limit response is relayed rather than a 502.
+        assert_eq!(outcome.backend_id.as_deref(), Some("backup"));
+        assert_eq!(outcome.status, 429);
+        assert!(body_text(&mut outcome).await.contains("rate limit"));
     }
 
     #[tokio::test]
@@ -840,6 +1150,8 @@ mod tests {
         .await;
         let mut setup = setup(1, backup.port);
         setup.config.backends[1].base_url = backup.url("/v1");
+        // A retry is attempted before the backend is given up on.
+        setup.config.backends[0].retries = 1;
         let setup = Setup {
             client: setup.client,
             manager: BackendManager::new(setup.config.clone()),
@@ -1377,28 +1689,64 @@ mod tests {
     }
 
     #[test]
-    fn rate_limit_regex_matches_provider_wordings() {
+    fn limit_regex_matches_rate_limit_wordings_only() {
         for message in [
             "rate limit exceeded",
             "Rate Limit",
             "rate_limit",
-            "insufficient_quota",
             "limit reached",
             "you have reached your limit",
             "Too Many Requests",
             "overloaded",
-            "quota exceeded",
         ] {
             assert!(
-                RATE_LIMIT_RE.is_match(message),
-                "expected match for {message:?}"
+                LIMIT_RE.is_match(message),
+                "expected a limit match for {message:?}"
+            );
+            assert!(
+                !FUNDS_RE.is_match(message),
+                "did not expect a funds match for {message:?}"
             );
         }
         for message in ["ok", "internal error", "model not found", ""] {
             assert!(
-                !RATE_LIMIT_RE.is_match(message),
-                "unexpected match for {message:?}"
+                !LIMIT_RE.is_match(message),
+                "unexpected limit match for {message:?}"
+            );
+            assert!(
+                !FUNDS_RE.is_match(message),
+                "unexpected funds match for {message:?}"
             );
         }
+    }
+
+    #[test]
+    fn funds_regex_matches_credit_and_quota_wordings() {
+        for message in [
+            "insufficient_quota",
+            "quota exceeded",
+            "Insufficient balance",
+            "Insufficient funds",
+            "CreditsError",
+            "payment required",
+            "out of credits",
+            "please check your plan and billing details",
+        ] {
+            assert!(
+                FUNDS_RE.is_match(message),
+                "expected a funds match for {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_delays_double_from_the_base_and_cap_at_sixty_seconds() {
+        assert_eq!(retry_delay_ms(5_000, 0), 5_000);
+        assert_eq!(retry_delay_ms(5_000, 1), 10_000);
+        assert_eq!(retry_delay_ms(5_000, 2), 20_000);
+        assert_eq!(retry_delay_ms(5_000, 3), 40_000);
+        assert_eq!(retry_delay_ms(5_000, 4), 60_000);
+        assert_eq!(retry_delay_ms(5_000, 9), 60_000);
+        assert_eq!(retry_delay_ms(0, 4), 0);
     }
 }

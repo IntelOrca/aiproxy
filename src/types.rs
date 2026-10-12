@@ -20,6 +20,10 @@ pub struct BackendConfig {
     /// a priority rank equally and are only used when no prioritized backend is
     /// healthy. Set 0 on the primary, 1 on the fallbacks.
     pub priority: Option<i64>,
+    /// How many times to retry this backend before failing over, waiting
+    /// longer each time (starting at `retryBaseDelayMs`, doubling, capped at
+    /// 60s). Defaults to 5.
+    pub retries: u64,
 }
 
 impl BackendConfig {
@@ -31,6 +35,7 @@ impl BackendConfig {
             model: None,
             api_key: None,
             priority: None,
+            retries: DEFAULT_BACKEND_RETRIES,
         }
     }
 
@@ -62,6 +67,9 @@ pub struct Config {
     pub session_ttl_ms: u64,
     pub upstream_timeout_ms: u64,
     pub max_retries: u64,
+    /// Base wait before retrying the same backend; doubles each retry and is
+    /// capped at 60s (default 5000ms).
+    pub retry_base_delay_ms: u64,
     /// Static model list served by GET /v1/models. If unset, proxied from a healthy backend.
     pub models: Option<Vec<String>>,
     /// Client model name -> backend model name, applied on forward.
@@ -94,6 +102,7 @@ impl Default for Config {
             session_ttl_ms: 30 * 60_000,
             upstream_timeout_ms: 600_000,
             max_retries: 1,
+            retry_base_delay_ms: 5_000,
             models: None,
             model_map: None,
             api_keys: None,
@@ -122,6 +131,10 @@ impl Config {
 
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_RETRY_STATUS_CODES: [u16; 2] = [429, 529];
+
+/// How many times a backend is retried (with a growing wait) before the
+/// request fails over to another backend. Overridable per backend.
+pub const DEFAULT_BACKEND_RETRIES: u64 = 5;
 
 /// A persisted session -> backend pin.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -29,6 +29,7 @@ fn sandbox_backends(port: u16) -> Vec<BackendConfig> {
             model: None,
             api_key: None,
             priority: None,
+            retries: crate::types::DEFAULT_BACKEND_RETRIES,
         })
         .collect()
 }
