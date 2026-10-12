@@ -58,19 +58,20 @@ goto :eof
 echo Usage: aiproxy.bat [options]
 echo.
 echo   -p, --port ^<port^>  Listen port.
-echo                 Router: overrides config "port". Sandbox: default 6060.
+echo                 Router: overrides the config port. Sandbox: default 6060.
 echo   -b, --bind ^<addr^>  Listen address: HOST, HOST:PORT, or *:PORT for every
-echo                 interface. Overrides config "host". A port here must not
-echo                 disagree with -p.
+echo                 interface. Overrides the config bind/host. A port here must
+echo                 not disagree with -p.
 echo   --sandbox     Run the fake sandbox cluster (router + 3 fake backends).
-echo   --config ^<path^>   Router config file (default: config.json).
+echo   --config ^<path^>   Router config file (default:
+echo                 ~/.config/aiproxy/aiproxy.json, then /etc/aiproxy/aiproxy.json).
 echo   -h, --help    Show this help.
 echo.
 echo Examples:
 echo   aiproxy.bat --sandbox -p 6060            Router on 6060 + fake backends on 6061..6063
 echo   aiproxy.bat -b *:9090                    Router on every interface, port 9090
 echo   aiproxy.bat -b localhost                 Router on localhost, config port
-echo   aiproxy.bat                               Router with config.json
+echo   aiproxy.bat                               Router with the default config
 echo   aiproxy.bat --config config.alt.json      Router with another config
 exit /b 0
 

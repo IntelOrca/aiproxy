@@ -29,11 +29,11 @@ FROM scratch
 # Run as non-root (numeric uid works without an /etc/passwd in scratch).
 USER 65532:65532
 
-# The router reads config.json from the working directory; provide the example
-# config as a sensible default. Mount your own config with:
-#   docker run -v "$PWD/config.json:/config.json" ...
+# The router reads /etc/aiproxy/aiproxy.json by default; ship the example
+# config there. Mount your own config with:
+#   docker run -v "$PWD/config.json:/etc/aiproxy/aiproxy.json" ...
 COPY --from=build /app/target/x86_64-unknown-linux-musl/release/aiproxy /aiproxy
-COPY --from=build /app/config.example.json /config.json
+COPY --from=build /app/config.example.json /etc/aiproxy/aiproxy.json
 
 EXPOSE 8080
 

@@ -10,7 +10,7 @@ use crate::bind::normalize_host;
 use crate::log::warn;
 use crate::types::{BackendConfig, Config, DEFAULT_BACKEND_RETRIES, DEFAULT_HOST};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Fallback backend used when no backends are configured.
 const DEFAULT_BACKEND_URL: &str = "http://127.0.0.1:3456/v1";
@@ -18,22 +18,22 @@ const DEFAULT_BACKEND_URL: &str = "http://127.0.0.1:3456/v1";
 /// Load the router config from `path`, falling back to defaults for anything
 /// missing or invalid.
 pub fn load_config(path: impl AsRef<Path>) -> Config {
-    let path = path.as_ref();
-    let partial = match std::fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(map)) => Some(map),
-            _ => {
-                warn(format!(
-                    "{} not found or invalid; using defaults.",
-                    path.display()
-                ));
-                None
-            }
-        },
-        Err(_) => {
+    load_config_at(Some(path.as_ref()))
+}
+
+/// Load the router config from an optional path. `None` means no config file
+/// was found, which logs and starts from the built-in defaults.
+pub fn load_config_at(path: Option<&Path>) -> Config {
+    let partial = match path {
+        Some(path) => load_config_file(path),
+        None => {
             warn(format!(
-                "{} not found or invalid; using defaults.",
-                path.display()
+                "no config found at {}; using defaults.",
+                default_config_paths()
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" or ")
             ));
             None
         }
@@ -67,6 +67,7 @@ pub fn load_config(path: impl AsRef<Path>) -> Config {
     Config {
         host: load_host(get("host")),
         port: load_port(get("port")),
+        bind: load_bind(get("bind")),
         backends,
         sticky: bool_or(get("sticky"), true),
         health_check_interval_ms: number_or(get("healthCheckIntervalMs"), 10_000.0) as u64,
@@ -111,6 +112,64 @@ pub fn load_config(path: impl AsRef<Path>) -> Config {
         recent_routes: number_or(get("recentRoutes"), 200.0) as u64,
         shutdown_grace_ms: number_or(get("shutdownGraceMs"), 10_000.0) as u64,
     }
+}
+
+/// Read a config file into its untyped object, warning and returning `None`
+/// when the file is missing or invalid.
+fn load_config_file(path: &Path) -> Option<serde_json::Map<String, Value>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(_) => {
+            warn(format!(
+                "{} not found or invalid; using defaults.",
+                path.display()
+            ));
+            return None;
+        }
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(map)) => Some(map),
+        _ => {
+            warn(format!(
+                "{} not found or invalid; using defaults.",
+                path.display()
+            ));
+            None
+        }
+    }
+}
+
+/// Paths searched, in order, when `--config` is not given: the user config
+/// and then the system-wide one.
+pub fn default_config_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = home_dir() {
+        paths.push(home.join(".config").join("aiproxy").join("aiproxy.json"));
+    }
+    paths.push(PathBuf::from("/etc/aiproxy/aiproxy.json"));
+    paths
+}
+
+/// The config file to load: an explicit `--config` path always wins;
+/// otherwise the first existing file from [`default_config_paths`].
+pub fn resolve_config_path(explicit: Option<&Path>) -> Option<PathBuf> {
+    match explicit {
+        Some(path) => Some(path.to_path_buf()),
+        None => first_existing(&default_config_paths()),
+    }
+}
+
+/// First path that names an existing file, if any.
+fn first_existing(paths: &[PathBuf]) -> Option<PathBuf> {
+    paths.iter().find(|path| path.is_file()).cloned()
+}
+
+/// Home directory: `$HOME` on Unix and macOS, `%USERPROFILE%` on Windows.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 fn load_backends(raw: Option<&Value>) -> Vec<BackendConfig> {
@@ -186,6 +245,20 @@ fn load_port(raw: Option<&Value>) -> u16 {
             }
         },
         _ => default,
+    }
+}
+
+/// Load the listen bind. A non-empty string uses `-b`/`--bind` syntax
+/// (`host`, `host:port`, `*:port`) and overrides `host`/`port`; anything else
+/// is ignored. A string that does not parse stops the router in `main`.
+fn load_bind(raw: Option<&Value>) -> Option<String> {
+    match raw {
+        None | Some(Value::Null) => None,
+        Some(Value::String(bind)) if !bind.trim().is_empty() => Some(bind.trim().to_string()),
+        Some(_) => {
+            warn(format!("invalid bind {}; ignored.", display(raw)));
+            None
+        }
     }
 }
 
@@ -391,6 +464,71 @@ mod tests {
 
         let bogus = write_config(&dir, "bogus.json", r#"{"host":8080}"#);
         assert_eq!(load_config(&bogus).host, "127.0.0.1");
+    }
+
+    #[test]
+    fn bind_is_kept_as_a_trimmed_string_and_ignored_otherwise() {
+        let dir = temp_dir();
+        let absent = write_config(&dir, "absent.json", r#"{"backends":[]}"#);
+        assert_eq!(load_config(&absent).bind, None);
+
+        let value = write_config(&dir, "bind.json", r#"{"bind":" *:9090 "}"#);
+        assert_eq!(load_config(&value).bind.as_deref(), Some("*:9090"));
+
+        // An empty or non-string value is ignored and the host/port stand.
+        let empty = write_config(&dir, "empty.json", r#"{"bind":""}"#);
+        assert_eq!(load_config(&empty).bind, None);
+
+        let number = write_config(&dir, "number.json", r#"{"bind":8080}"#);
+        assert_eq!(load_config(&number).bind, None);
+    }
+
+    #[test]
+    fn no_config_file_starts_from_defaults() {
+        let config = load_config_at(None);
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.port, 8080);
+        assert_eq!(config.bind, None);
+        assert_eq!(config.backends.len(), 1);
+    }
+
+    #[test]
+    fn resolve_config_path_prefers_an_explicit_path() {
+        let dir = temp_dir();
+        let explicit = dir.path().join("missing.json");
+        assert_eq!(resolve_config_path(Some(&explicit)), Some(explicit));
+    }
+
+    #[test]
+    fn the_first_existing_path_wins() {
+        let dir = temp_dir();
+        let missing = dir.path().join("missing.json");
+        let second = write_config(&dir, "second.json", "{}");
+        let third = write_config(&dir, "third.json", "{}");
+
+        assert_eq!(
+            first_existing(&[missing.clone(), second.clone(), third.clone()]),
+            Some(second)
+        );
+        // A missing first candidate falls through to the next.
+        assert_eq!(
+            first_existing(&[missing.clone(), third.clone()]),
+            Some(third)
+        );
+        assert_eq!(first_existing(&[missing]), None);
+    }
+
+    #[test]
+    fn default_config_paths_end_with_the_system_config() {
+        let paths = default_config_paths();
+        assert_eq!(
+            paths.last().expect("at least one path"),
+            &PathBuf::from("/etc/aiproxy/aiproxy.json")
+        );
+        if home_dir().is_some() {
+            assert_eq!(paths.len(), 2);
+            assert!(paths[0].ends_with(".config/aiproxy/aiproxy.json"));
+        }
     }
 
     #[test]

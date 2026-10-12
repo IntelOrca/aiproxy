@@ -102,6 +102,26 @@ pub fn resolve_listen(
     }
 }
 
+/// Combine the configured listen address, a `bind` value from the config, and
+/// the `-b`/`--bind` and `-p`/`--port` overrides, returning the host and port
+/// to listen on.
+///
+/// The config bind is resolved first: its port, if it carries one, replaces
+/// the configured `port`. The command line is then applied on top, so `-b`
+/// and `-p` always override the config. A `-p`/`--port` that names a different
+/// port than a `-b`/`--bind` value is a contradiction and fails.
+pub fn resolve_listen_from_config(
+    host: &str,
+    port: u16,
+    config_bind: Option<&str>,
+    cli_bind: Option<&str>,
+    port_override: Option<u16>,
+) -> Result<(String, u16), String> {
+    let (host, port) = resolve_listen(host, port, config_bind, None)
+        .map_err(|message| format!("invalid bind in the config: {message}"))?;
+    resolve_listen(&host, port, cli_bind, port_override)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +230,69 @@ mod tests {
         assert_eq!(normalize_host("*"), WILDCARD_HOST);
         assert_eq!(normalize_host("  "), WILDCARD_HOST);
         assert_eq!(normalize_host("localhost"), "localhost");
+    }
+
+    #[test]
+    fn a_config_bind_overrides_the_configured_host_and_port() {
+        assert_eq!(
+            resolve_listen_from_config("127.0.0.1", 8080, Some("*:9090"), None, None).unwrap(),
+            (WILDCARD_HOST.to_string(), 9090)
+        );
+        // A config bind without a port keeps the configured one.
+        assert_eq!(
+            resolve_listen_from_config("127.0.0.1", 8080, Some("localhost"), None, None).unwrap(),
+            ("localhost".to_string(), 8080)
+        );
+    }
+
+    #[test]
+    fn the_command_line_overrides_a_config_bind() {
+        // -b wins over the config bind entirely.
+        assert_eq!(
+            resolve_listen_from_config(
+                "127.0.0.1",
+                8080,
+                Some("*:9090"),
+                Some("localhost:7070"),
+                None
+            )
+            .unwrap(),
+            ("localhost".to_string(), 7070)
+        );
+        // -p overrides the port a config bind carried.
+        assert_eq!(
+            resolve_listen_from_config("127.0.0.1", 8080, Some("*:9090"), None, Some(7070))
+                .unwrap(),
+            (WILDCARD_HOST.to_string(), 7070)
+        );
+        // -p applies on top of a host-only config bind too.
+        assert_eq!(
+            resolve_listen_from_config("127.0.0.1", 8080, Some("localhost"), None, Some(7070))
+                .unwrap(),
+            ("localhost".to_string(), 7070)
+        );
+    }
+
+    #[test]
+    fn an_invalid_config_bind_is_an_error() {
+        let error =
+            resolve_listen_from_config("127.0.0.1", 8080, Some("localhost:abc"), None, None)
+                .unwrap_err();
+        assert!(error.contains("config"), "{error}");
+        assert!(error.contains("localhost:abc"), "{error}");
+    }
+
+    #[test]
+    fn a_cli_bind_and_port_that_disagree_still_fail_with_a_config_bind() {
+        let error = resolve_listen_from_config(
+            "127.0.0.1",
+            8080,
+            Some("localhost"),
+            Some("*:9090"),
+            Some(8080),
+        )
+        .unwrap_err();
+        assert!(error.contains("9090"), "{error}");
+        assert!(error.contains("8080"), "{error}");
     }
 }

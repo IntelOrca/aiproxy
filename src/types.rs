@@ -59,6 +59,10 @@ pub struct Config {
     /// `0.0.0.0` means every interface.
     pub host: String,
     pub port: u16,
+    /// Full listen address from the config in `-b`/`--bind` syntax
+    /// (`localhost`, `host:port`, `*:port`). Overrides `host`/`port`; the
+    /// command line overrides it in turn.
+    pub bind: Option<String>,
     pub backends: Vec<BackendConfig>,
     /// Route each conversation to the same backend (recommended for cache affinity).
     pub sticky: bool,
@@ -95,6 +99,7 @@ impl Default for Config {
             // Note: 0 is not a meaningful config value (JS `0 || default`),
             // but it is used directly by tests to request an ephemeral port.
             port: 8080,
+            bind: None,
             backends: Vec::new(),
             sticky: true,
             health_check_interval_ms: 10_000,

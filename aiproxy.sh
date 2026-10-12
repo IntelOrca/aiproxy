@@ -16,19 +16,20 @@ usage() {
 Usage: aiproxy.sh [options]
 
   -p, --port <port>  Listen port.
-                     Router: overrides config "port". Sandbox: default 6060.
+                     Router: overrides the config port. Sandbox: default 6060.
   -b, --bind <addr>  Listen address: HOST, HOST:PORT, or *:PORT for every
-                     interface. Overrides config "host". A port here must not
-                     disagree with -p.
+                     interface. Overrides the config bind/host. A port here
+                     must not disagree with -p.
   --sandbox          Run the fake sandbox cluster (router + 3 fake backends).
-  --config <path>    Router config file (default: config.json).
+  --config <path>    Router config file (default: ~/.config/aiproxy/aiproxy.json,
+                     then /etc/aiproxy/aiproxy.json).
   -h, --help         Show this help.
 
 Examples:
   ./aiproxy.sh --sandbox -p 6060         Router on 6060 + fake backends on 6061..6063
   ./aiproxy.sh -b '*:9090'               Router on every interface, port 9090
   ./aiproxy.sh -b localhost              Router on localhost, config port
-  ./aiproxy.sh                           Router with config.json
+  ./aiproxy.sh                           Router with the default config
   ./aiproxy.sh --config config.alt.json  Router with another config
 EOF
 }

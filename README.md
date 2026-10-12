@@ -42,10 +42,14 @@ Docker (see below).
 
 ### From source
 
-Copy the example config and edit it to match your backends:
+Copy the example config and edit it to match your backends. Without
+`--config`, the router looks for `~/.config/aiproxy/aiproxy.json` and then
+`/etc/aiproxy/aiproxy.json`, and starts with a single default backend when
+neither exists:
 
 ```bash
-cp config.example.json config.json
+mkdir -p ~/.config/aiproxy
+cp config.example.json ~/.config/aiproxy/aiproxy.json
 ```
 
 Then start the router:
@@ -53,11 +57,11 @@ Then start the router:
 - Windows: `aiproxy.bat`
 - Linux/macOS: `./aiproxy.sh`
 
-The router accepts `--config <path>` to select a config file (default
-`config.json`), `--port <port>` to override the configured port, and
-`--bind <address>` to choose where it listens. The launchers build a release
-binary on first run and reuse `target/release/aiproxy` afterwards; you can also
-run `cargo run --release --` directly.
+`--config <path>` selects a config file explicitly, `--port <port>` overrides
+the configured port, and `--bind <address>` chooses where it listens. The
+launchers build a release binary on first run and reuse
+`target/release/aiproxy` afterwards; you can also run
+`cargo run --release --` directly.
 
 `--bind` takes a host, a host and port, or `*:PORT` for every interface:
 
@@ -67,9 +71,11 @@ aiproxy -b '*:9090'             # listen on every interface, port 9090
 aiproxy -b 192.168.1.20:9090    # listen on one interface and port
 ```
 
-A port given in the bind address overrides the configured `port`; `--port` is a
-plain override on its own. Passing both with different ports is a contradiction,
-so the router refuses to start:
+The config's `bind` key takes the same values and overrides `host` and `port`;
+`--bind` and `--port` override the config in turn. A port given in a bind value
+overrides the configured port, while `--port` is a plain override on its own.
+Passing both on the command line with different ports is a contradiction, so
+the router refuses to start:
 
 ```bash
 aiproxy -b '*:9090' --port 8080   # error: two different ports
@@ -85,12 +91,13 @@ non-root user, exposing port 8080.
 ```bash
 docker build -t aiproxy .
 docker run --rm -p 8080:8080 \
-  -v "$PWD/config.json:/config.json" \
+  -v "$PWD/config.json:/etc/aiproxy/aiproxy.json" \
   aiproxy
 ```
 
-Without a mounted config the image falls back to `config.example.json`. Backends
-must be reachable from inside the container.
+The image ships `config.example.json` as `/etc/aiproxy/aiproxy.json`, so it
+starts without a mount; mount your own config over it. Backends must be
+reachable from inside the container.
 
 ### Sandbox demo
 
@@ -107,13 +114,16 @@ here too: `./aiproxy.sh --sandbox -b '*:6060'` moves the whole cluster.
 
 ## Configuration
 
-All settings live in `config.json`. `config.example.json` is the template and
-`config.sandbox.json` configures the sandbox cluster.
+All settings live in the config file: `~/.config/aiproxy/aiproxy.json`,
+`/etc/aiproxy/aiproxy.json`, or the path given with `--config`.
+`config.example.json` is the template and `config.sandbox.json` configures the
+sandbox cluster.
 
 | Key                     | Default      | Description                                                                  |
 | ----------------------- | ------------ | ---------------------------------------------------------------------------- |
 | `host`                  | `127.0.0.1`  | Router listen host; `*` or `0.0.0.0` means every interface.                   |
 | `port`                  | `8080`       | Router listen port.                                                          |
+| `bind`                  | unset        | Full listen address (`host`, `host:port` or `*:port`). Overrides `host`/`port`; `--bind`/`--port` override it. An invalid value stops the router. |
 | `backends`              | required     | Array of backends, each `{id, baseUrl, weight, model?, apiKey?, priority?, retries?}`. |
 | `sticky`                | `true`       | Pin each conversation to one backend.                                        |
 | `healthCheckIntervalMs` | `10000`      | How often backends are health-checked.                                       |
@@ -161,6 +171,8 @@ the per-backend `apiKey` if a backend needs its own.
 Unknown or invalid values in the config fall back to the defaults above, so a
 partial or malformed config still starts the router. As in previous versions, a
 numeric setting of `0` (or a non-numeric value) also falls back to its default.
+The one exception is `bind`: a value that does not parse stops the router, so a
+typo cannot silently bind to another address.
 
 ### Persisted state
 

@@ -10,16 +10,33 @@ fn aiproxy() -> Command {
     Command::new(env!("CARGO_BIN_EXE_aiproxy"))
 }
 
+/// Write a config file at `path`, keeping the router's persisted state in
+/// `state_dir` (created here) so tests never touch the real state directory.
+fn write_config(
+    path: &std::path::Path,
+    state_dir: &std::path::Path,
+    mut contents: serde_json::Value,
+) {
+    std::fs::create_dir_all(state_dir).expect("state dir");
+    contents["stateDir"] = json!(state_dir.display().to_string());
+    if contents.get("backends").is_none() {
+        contents["backends"] = json!([]);
+    }
+    std::fs::write(path, contents.to_string()).expect("write config");
+}
+
 /// A config file that keeps the router's persisted state inside a temp dir.
 fn config(dir: &tempfile::TempDir) -> std::path::PathBuf {
-    let state_dir = dir.path().join("state");
-    std::fs::create_dir_all(&state_dir).expect("state dir");
     let path = dir.path().join("config.json");
-    std::fs::write(
-        &path,
-        json!({ "stateDir": state_dir.display().to_string(), "backends": [] }).to_string(),
-    )
-    .expect("write config");
+    write_config(&path, &dir.path().join("state"), json!({}));
+    path
+}
+
+/// Write the user-level config (`~/.config/aiproxy/aiproxy.json`) under `home`.
+fn user_config(home: &std::path::Path, contents: serde_json::Value) -> std::path::PathBuf {
+    let path = home.join(".config/aiproxy/aiproxy.json");
+    std::fs::create_dir_all(path.parent().expect("config parent")).expect("config dir");
+    write_config(&path, &home.join("state"), contents);
     path
 }
 
@@ -32,15 +49,9 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// Run the router with `args` and collect the lines it prints on stdout.
-fn run_router(config: &std::path::Path, args: &[&str]) -> (Child, mpsc::Receiver<String>) {
-    let mut command = aiproxy();
-    command
-        .arg("--config")
-        .arg(config)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+/// Spawn the router and collect the lines it prints on stdout.
+fn spawn_router(command: &mut Command) -> (Child, mpsc::Receiver<String>) {
+    command.stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = command.spawn().expect("spawn aiproxy");
 
     let stdout = child.stdout.take().expect("stdout");
@@ -58,6 +69,13 @@ fn run_router(config: &std::path::Path, args: &[&str]) -> (Child, mpsc::Receiver
         }
     });
     (child, rx)
+}
+
+/// Run the router with `args` and collect the lines it prints on stdout.
+fn run_router(config: &std::path::Path, args: &[&str]) -> (Child, mpsc::Receiver<String>) {
+    let mut command = aiproxy();
+    command.arg("--config").arg(config).args(args);
+    spawn_router(&mut command)
 }
 
 /// Wait for a line containing `expected`, killing the router either way.
@@ -171,4 +189,140 @@ fn a_bind_without_a_port_uses_the_configured_port() {
         ),
         "the router did not report listening on localhost:{port}"
     );
+}
+
+#[test]
+fn the_user_config_is_found_without_a_config_option() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let port = free_port();
+    let path = user_config(dir.path(), json!({ "port": port }));
+    let mut command = aiproxy();
+    command.env("HOME", dir.path());
+    let (mut child, rx) = spawn_router(&mut command);
+    assert!(
+        wait_for_line(
+            &mut child,
+            &rx,
+            &format!(
+                "config: {} — listening on http://127.0.0.1:{port}",
+                path.display()
+            )
+        ),
+        "the router did not load {} and listen on port {port}",
+        path.display()
+    );
+}
+
+#[test]
+fn an_explicit_config_wins_over_the_user_config() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    user_config(dir.path(), json!({ "port": free_port() }));
+    let port = free_port();
+    let explicit = dir.path().join("explicit.json");
+    write_config(
+        &explicit,
+        &dir.path().join("explicit-state"),
+        json!({ "port": port }),
+    );
+    let mut command = aiproxy();
+    command
+        .env("HOME", dir.path())
+        .arg("--config")
+        .arg(&explicit);
+    let (mut child, rx) = spawn_router(&mut command);
+    assert!(
+        wait_for_line(
+            &mut child,
+            &rx,
+            &format!("listening on http://127.0.0.1:{port}")
+        ),
+        "the router did not use the explicit config on port {port}"
+    );
+}
+
+#[test]
+fn a_config_bind_selects_the_listen_address() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let port = free_port();
+    let path = dir.path().join("config.json");
+    write_config(
+        &path,
+        &dir.path().join("state"),
+        json!({ "bind": format!("127.0.0.1:{port}") }),
+    );
+    let (mut child, rx) = run_router(&path, &[]);
+    assert!(
+        wait_for_line(
+            &mut child,
+            &rx,
+            &format!("listening on http://127.0.0.1:{port}")
+        ),
+        "the router did not listen on the config bind port {port}"
+    );
+}
+
+#[test]
+fn the_command_line_bind_overrides_the_config_bind() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let config_port = free_port();
+    let cli_port = free_port();
+    let path = dir.path().join("config.json");
+    write_config(
+        &path,
+        &dir.path().join("state"),
+        json!({ "bind": format!("127.0.0.1:{config_port}") }),
+    );
+    let (mut child, rx) = run_router(&path, &["--bind", &format!("localhost:{cli_port}")]);
+    assert!(
+        wait_for_line(
+            &mut child,
+            &rx,
+            &format!("listening on http://localhost:{cli_port}")
+        ),
+        "the command-line bind did not override the config bind"
+    );
+}
+
+#[test]
+fn the_command_line_port_overrides_a_config_bind_port() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let config_port = free_port();
+    let cli_port = free_port();
+    let path = dir.path().join("config.json");
+    write_config(
+        &path,
+        &dir.path().join("state"),
+        json!({ "bind": format!("127.0.0.1:{config_port}") }),
+    );
+    let (mut child, rx) = run_router(&path, &["--port", &cli_port.to_string()]);
+    assert!(
+        wait_for_line(
+            &mut child,
+            &rx,
+            &format!("listening on http://127.0.0.1:{cli_port}")
+        ),
+        "--port did not override the config bind port"
+    );
+}
+
+#[test]
+fn an_invalid_config_bind_refuses_to_start() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("config.json");
+    write_config(
+        &path,
+        &dir.path().join("state"),
+        json!({ "bind": "localhost:abc" }),
+    );
+    let output = aiproxy()
+        .arg("--config")
+        .arg(&path)
+        .output()
+        .expect("run aiproxy");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("localhost:abc"), "{stderr}");
+    assert!(stderr.contains("config"), "{stderr}");
+    assert!(!stderr.contains("listening on"), "{stderr}");
 }

@@ -1,8 +1,8 @@
 //! aiproxy — a local, OpenAI-compatible completions router and load balancer.
 
 use aiproxy::app::run_until_shutdown;
-use aiproxy::bind::resolve_listen;
-use aiproxy::config::load_config;
+use aiproxy::bind::{resolve_listen, resolve_listen_from_config};
+use aiproxy::config::{load_config_at, resolve_config_path};
 use aiproxy::log::info;
 use aiproxy::sandbox::{run_sandbox, sandbox_port};
 use aiproxy::sandbox_server::run_standalone;
@@ -14,9 +14,11 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(name = "aiproxy", version, about, long_about = None)]
 struct Args {
-    /// Path to the router config file.
-    #[arg(long, default_value = "config.json", value_name = "PATH")]
-    config: PathBuf,
+    /// Path to the router config file. When omitted, the user config
+    /// (~/.config/aiproxy/aiproxy.json) and then the system-wide config
+    /// (/etc/aiproxy/aiproxy.json) are tried.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
 
     /// Override the listen port from the config.
     #[arg(short, long, value_name = "PORT")]
@@ -45,18 +47,33 @@ async fn main() {
 
     if args.sandbox {
         // The sandbox runs its own router to completion.
-        let (host, port) = listen_address(DEFAULT_HOST, sandbox_port(), &args);
+        let (host, port) = listen_or_exit(resolve_listen(
+            DEFAULT_HOST,
+            sandbox_port(),
+            args.bind.as_deref(),
+            args.port,
+        ));
         run_sandbox(&host, port).await;
     }
 
-    let mut config = load_config(&args.config);
-    let (host, port) = listen_address(&config.host, config.port, &args);
+    let config_path = resolve_config_path(args.config.as_deref());
+    let mut config = load_config_at(config_path.as_deref());
+    let (host, port) = listen_or_exit(resolve_listen_from_config(
+        &config.host,
+        config.port,
+        config.bind.as_deref(),
+        args.bind.as_deref(),
+        args.port,
+    ));
     config.host = host;
     config.port = port;
 
     info(format!(
         "config: {} — listening on http://{}:{} — backends: {}",
-        args.config.display(),
+        config_path
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none, using defaults".to_string()),
         config.host,
         config.port,
         config
@@ -69,10 +86,10 @@ async fn main() {
     run_until_shutdown(config).await;
 }
 
-/// Resolve the effective listen address, exiting with a usage error when `-b`
-/// and `-p` contradict each other.
-fn listen_address(host: &str, port: u16, args: &Args) -> (String, u16) {
-    match resolve_listen(host, port, args.bind.as_deref(), args.port) {
+/// Unwrap a resolved listen address, exiting with a usage error when the
+/// `--bind`/`--port` combination is invalid or contradictory.
+fn listen_or_exit(address: Result<(String, u16), String>) -> (String, u16) {
+    match address {
         Ok(address) => address,
         Err(message) => Args::command()
             .error(clap::error::ErrorKind::ArgumentConflict, message)
