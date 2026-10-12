@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod backend;
+pub mod bind;
 pub mod config;
 pub mod dashboard;
 pub mod isotime;

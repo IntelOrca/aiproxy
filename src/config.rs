@@ -6,8 +6,9 @@
 //! must still start the router with defaults — so the coercion rules are
 //! reproduced here rather than using `serde`'s strict, all-or-nothing parsing.
 
+use crate::bind::normalize_host;
 use crate::log::warn;
-use crate::types::{BackendConfig, Config};
+use crate::types::{BackendConfig, Config, DEFAULT_HOST};
 use serde_json::Value;
 use std::path::Path;
 
@@ -64,6 +65,7 @@ pub fn load_config(path: impl AsRef<Path>) -> Config {
     }
 
     Config {
+        host: load_host(get("host")),
         port: load_port(get("port")),
         backends,
         sticky: bool_or(get("sticky"), true),
@@ -143,6 +145,23 @@ fn load_backends(raw: Option<&Value>) -> Vec<BackendConfig> {
             }
         })
         .collect()
+}
+
+/// Load the listen host. `*` and an empty host mean every interface, matching
+/// the `-b` shorthand.
+fn load_host(raw: Option<&Value>) -> String {
+    match raw {
+        Some(Value::String(host)) if !host.trim().is_empty() => normalize_host(host),
+        Some(_) => {
+            warn(format!(
+                "invalid host {}; using {}.",
+                display(raw),
+                DEFAULT_HOST
+            ));
+            DEFAULT_HOST.to_string()
+        }
+        None => DEFAULT_HOST.to_string(),
+    }
 }
 
 /// Load the listen port. Mirrors `Number(port) || 8080`, with the extra
@@ -348,6 +367,25 @@ mod tests {
         let dir = temp_dir();
         let path = write_config(&dir, "port.json", r#"{"port":9999}"#);
         assert_eq!(load_config(&path).port, 9999);
+    }
+
+    #[test]
+    fn host_defaults_to_loopback_and_honors_a_string() {
+        let dir = temp_dir();
+        let absent = write_config(&dir, "absent.json", r#"{"backends":[]}"#);
+        assert_eq!(load_config(&absent).host, "127.0.0.1");
+
+        let host = write_config(&dir, "host.json", r#"{"host":"0.0.0.0"}"#);
+        assert_eq!(load_config(&host).host, "0.0.0.0");
+
+        let wildcard = write_config(&dir, "wildcard.json", r#"{"host":"*"}"#);
+        assert_eq!(load_config(&wildcard).host, "0.0.0.0");
+
+        let empty = write_config(&dir, "empty.json", r#"{"host":"  "}"#);
+        assert_eq!(load_config(&empty).host, "127.0.0.1");
+
+        let bogus = write_config(&dir, "bogus.json", r#"{"host":8080}"#);
+        assert_eq!(load_config(&bogus).host, "127.0.0.1");
     }
 
     #[test]

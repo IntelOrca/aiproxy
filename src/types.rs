@@ -50,6 +50,9 @@ impl Default for BackendConfig {
 /// fields fall back to defaults and how.
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// Host to listen on. `127.0.0.1` unless the config or `-b` says otherwise;
+    /// `0.0.0.0` means every interface.
+    pub host: String,
     pub port: u16,
     pub backends: Vec<BackendConfig>,
     /// Route each conversation to the same backend (recommended for cache affinity).
@@ -80,6 +83,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            host: DEFAULT_HOST.to_string(),
             // Note: 0 is not a meaningful config value (JS `0 || default`),
             // but it is used directly by tests to request an ephemeral port.
             port: 8080,
@@ -116,6 +120,7 @@ impl Config {
     }
 }
 
+pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_RETRY_STATUS_CODES: [u16; 2] = [429, 529];
 
 /// A persisted session -> backend pin.

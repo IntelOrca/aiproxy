@@ -233,10 +233,10 @@ impl Running {
     }
 }
 
-/// Start the router. Binds to `127.0.0.1:<config.port>` (port 0 picks an
+/// Start the router. Binds to `<config.host>:<config.port>` (port 0 picks an
 /// ephemeral port, which tests use).
 pub async fn start_aiproxy(config: Config) -> std::io::Result<Running> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port)).await?;
+    let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port)).await?;
     let addr = listener.local_addr()?;
 
     let stats = Arc::new(StatsStore::load(&config));
@@ -288,8 +288,8 @@ pub async fn run_until_shutdown(config: Config) -> ! {
         Ok(running) => running,
         Err(err) => {
             error(format!(
-                "could not listen on 127.0.0.1:{}: {}",
-                config.port, err
+                "could not listen on {}:{}: {}",
+                config.host, config.port, err
             ));
             std::process::exit(1);
         }

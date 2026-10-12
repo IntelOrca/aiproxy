@@ -2,8 +2,8 @@
 //! load balancing, sticky sessions and the dashboard can be watched without
 //! any real backends.
 //!
-//! The router listens on `PORT` (default 6060); the fake backends take the
-//! next three ports.
+//! The router listens on `127.0.0.1:<port>` (`PORT` env var, default 6060); the
+//! fake backends take the next three ports.
 
 use crate::app::run_until_shutdown;
 use crate::sandbox_server::{start_sandbox_server, DEFAULT_MODELS};
@@ -43,9 +43,9 @@ pub fn sandbox_port() -> u16 {
 }
 
 /// The sandbox router configuration.
-pub fn sandbox_config() -> Config {
-    let port = sandbox_port();
+pub fn sandbox_config(host: &str, port: u16) -> Config {
     Config {
+        host: host.to_string(),
         port,
         backends: sandbox_backends(port),
         sticky: true,
@@ -60,8 +60,8 @@ pub fn sandbox_config() -> Config {
 }
 
 /// Start the fake backends and run the sandbox router until shutdown.
-pub async fn run_sandbox() -> ! {
-    let config = sandbox_config();
+pub async fn run_sandbox(host: &str, port: u16) -> ! {
+    let config = sandbox_config(host, port);
     let backend_ports = backend_ports(config.port);
 
     // Keep the backend handles alive for the lifetime of the process.

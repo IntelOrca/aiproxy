@@ -50,9 +50,27 @@ Then start the router:
 - Linux/macOS: `./aiproxy.sh`
 
 The router accepts `--config <path>` to select a config file (default
-`config.json`) and `--port <port>` to override the configured port. The
-launchers build a release binary on first run and reuse `target/release/aiproxy`
-afterwards; you can also run `cargo run --release --` directly.
+`config.json`), `--port <port>` to override the configured port, and
+`--bind <address>` to choose where it listens. The launchers build a release
+binary on first run and reuse `target/release/aiproxy` afterwards; you can also
+run `cargo run --release --` directly.
+
+`--bind` takes a host, a host and port, or `*:PORT` for every interface:
+
+```bash
+aiproxy -b localhost            # listen on localhost, with the configured port
+aiproxy -b '*:9090'             # listen on every interface, port 9090
+aiproxy -b 192.168.1.20:9090    # listen on one interface and port
+```
+
+A port given in the bind address overrides the configured `port`; `--port` is a
+plain override on its own. Passing both with different ports is a contradiction,
+so the router refuses to start:
+
+```bash
+aiproxy -b '*:9090' --port 8080   # error: two different ports
+aiproxy -b '*:9090' --port 9090   # fine: they agree
+```
 
 ### With Docker
 
@@ -80,7 +98,8 @@ you can watch load balancing, sticky sessions, and the dashboard.
 ```
 
 The router listens on 6060 and the fake backends on 6061, 6062, and 6063. Open
-http://127.0.0.1:6060/ in a browser for the live dashboard.
+http://127.0.0.1:6060/ in a browser for the live dashboard. `-b`/`--bind` works
+here too: `./aiproxy.sh --sandbox -b '*:6060'` moves the whole cluster.
 
 ## Configuration
 
@@ -89,6 +108,7 @@ All settings live in `config.json`. `config.example.json` is the template and
 
 | Key                     | Default      | Description                                                                  |
 | ----------------------- | ------------ | ---------------------------------------------------------------------------- |
+| `host`                  | `127.0.0.1`  | Router listen host; `*` or `0.0.0.0` means every interface.                   |
 | `port`                  | `8080`       | Router listen port.                                                          |
 | `backends`              | required     | Array of backends, each `{id, baseUrl, weight, model?, apiKey?, priority?}`. |
 | `sticky`                | `true`       | Pin each conversation to one backend.                                        |
